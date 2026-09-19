@@ -425,7 +425,10 @@ export class StateStore extends EventEmitter {
         }
       }
       this.paused = !!raw.paused;
-      this.pauseReason = raw.pauseReason ?? '';
+      // Only carry the pause reason across if we actually restored as PAUSED.
+      // A reason with paused=false is a stale leftover from a prior run and
+      // would otherwise show on the dashboard contradicting the LIVE status.
+      this.pauseReason = this.paused ? (raw.pauseReason ?? '') : '';
       console.log(`[persist] restored runtime state from ${file}`);
     } catch (e) {
       console.warn(`[persist] could not restore state: ${(e as Error).message}`);

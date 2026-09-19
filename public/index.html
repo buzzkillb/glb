@@ -572,7 +572,7 @@
     } else $('riskBand').textContent = '—';
     $('riskStatus').textContent = s.risk.paused ? 'PAUSED' : s.mode === 'live' ? 'LIVE' : 'RUNNING';
     $('riskStatus').className = s.risk.paused ? 'neg' : 'pos';
-    $('riskNote').innerHTML = s.risk.pauseReason
+    $('riskNote').innerHTML = (s.risk.paused && s.risk.pauseReason)
       ? `<div style="margin-top:8px;font-size:12px;color:var(--amber)">⚠ ${s.risk.pauseReason}</div>` : '';
 
     if (band && band.upper > 0) {

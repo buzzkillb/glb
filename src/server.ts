@@ -48,6 +48,9 @@ export class DashboardServer {
     });
     this.app.post('/api/resume', (_req, res) => {
       this.opts.store.paused = false;
+      // Clear the stale reason: once running again, an old pause message would
+      // otherwise sit on the dashboard contradicting the LIVE status.
+      this.opts.store.pauseReason = '';
       res.json({ paused: false });
     });
 
