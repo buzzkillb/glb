@@ -259,4 +259,43 @@ export interface Snapshot {
   };
   /** Rolling equity curve (ts + equity USD) for the dashboard chart. */
   equityHistory: { ts: number; equityUsd: number }[];
+  /**
+   * ACCOUNTABILITY AUDIT (measurement-only). Cross-checks the forever trade
+   * journal against the on-chain wallet, the strategy books, and the equity
+   * ring so the operator can verify the algorithm's reported PnL reconciles
+   * with real wallet movement instead of trusting a number in isolation.
+   */
+  audit: {
+    /** Fills in the forever journal (all strategies). */
+    journalFills: number;
+    /** Grid+DCA BUY fills in the journal. */
+    journalBuys: number;
+    /** Grid+DCA SELL fills in the journal. */
+    journalSells: number;
+    /** Gross USDC spent on journaled grid+DCA buys. */
+    journalBuyUsd: number;
+    /** Gross USDC proceeds from journaled grid+DCA sells. */
+    journalSellUsd: number;
+    /** Banked SELL realized PnL across the journal. */
+    journalRealizedUsd: number;
+    /** Fees across the journal. */
+    journalFeesUsd: number;
+    /** Fills still held in the in-memory ledger (capped). */
+    ledgerFills: number;
+    /** True when the ledger has hit its cap (older fills only in journal). */
+    ledgerCapped: boolean;
+    chainSol: number;
+    chainUsdc: number;
+    equityUsd: number;
+    positionBaseQty: number;
+    avgCostPerBase: number;
+    /** Journal-attributable SOL still held. */
+    trackedQty: number | null;
+    /** SOL on-chain not explained by any journaled fill (deposits/manual). */
+    untrackedQty: number | null;
+    booksSolQty: number;
+    booksMatchChain: boolean;
+    equityRingStartUsd: number | null;
+    equityRingSpanHours: number;
+  };
 }

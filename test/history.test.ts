@@ -32,6 +32,14 @@ test('rollupDay aggregates only grid+dca (memes excluded)', () => {
   assert.ok(Math.abs(rows.feesUsd - 0.4) < 1e-9);
   assert.ok(Math.abs(rows.netUsd - 0.6) < 1e-9);
   assert.equal(rows.roundTrips, 2);
+  assert.equal(rows.noData, false);
+});
+
+test('rollupDay marks an idle day noData (not a misleading zero)', () => {
+  const rows = rollupDay('2026-09-15', []);
+  assert.equal(rows.fills, 0);
+  assert.equal(rows.noData, true);
+  assert.equal(rows.netUsd, 0);
 });
 
 test('rollupDay computes win rate, averages, and profit factor', () => {

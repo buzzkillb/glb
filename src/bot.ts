@@ -78,13 +78,22 @@ async function main(): Promise<void> {
   });
 
   // Dashboard + long-memory daily history (SOL book)
-  const history = new HistoryStore();
+  const history = new HistoryStore(cfg.mode);
+  // BACKFILL: replay the forever journal so every day that ever had fills is
+  // recovered — including days the ledger cap dropped and days the bot was
+  // offline. Without this, the History tab silently omitted those days.
+  try {
+    const touched = history.rebuildFromJournal(store.equityHistory);
+    if (touched > 0) console.log(`[history] rebuilt ${touched} daily rows from the forever journal`);
+  } catch (e) {
+    console.warn(`[history] journal rebuild failed: ${(e as Error).message}`);
+  }
   // Seed today's rollup immediately so the History tab is populated on start,
   // then refresh it on every store snapshot (poll cadence, measurement only).
-  history.update(store.trades, store.equityHistory, store.price);
+  history.update(store.trades, store.equityHistory);
   store.on('snapshot', () => {
     try {
-      history.update(store.trades, store.equityHistory, store.price);
+      history.update(store.trades, store.equityHistory);
     } catch { /* measurement only — never crash the loop */ }
   });
   const dashboard = new DashboardServer({ cfg, store, history, port: PORT });

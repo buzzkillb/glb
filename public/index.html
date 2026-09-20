@@ -415,7 +415,22 @@
         <thead><tr><th>Day</th><th>Net PnL</th><th>Realized</th><th>Fees</th><th>Round-trips</th><th>Fills</th><th>Win rate</th><th>PF</th><th>Equity EOD</th><th>Price EOD</th></tr></thead>
         <tbody id="histTable"></tbody>
       </table>
-      <div class="muted" style="font-size:11px;margin-top:6px">One row per UTC day, persisted to .botstate/history-sol.json and kept forever.</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">One row per UTC day, rebuilt from the forever trade journal (grey days had no fills). Equity endpoints come from the forever equity archive.</div>
+    </div>
+    <div class="section">
+      <h2>Accounting Audit <span class="muted">(journal vs on-chain wallet vs strategy books)</span></h2>
+      <div class="statline" id="auditStats">
+        <span>Journal fills <b id="auJournalFills">-</b></span>
+        <span>Journal realized <b id="auJournalRealized">-</b></span>
+        <span>Journal fees <b id="auJournalFees">-</b></span>
+        <span>Ledger fills <b id="auLedgerFills">-</b></span>
+        <span>Tracked SOL <b id="auTracked">-</b></span>
+        <span>Untracked SOL <b id="auUntracked">-</b></span>
+        <span>Books vs chain <b id="auBooksMatch">-</b></span>
+        <span>Chain SOL <b id="auChainSol">-</b></span>
+        <span>Basis $/SOL <b id="auBasis">-</b></span>
+      </div>
+      <div class="muted" id="auNote" style="font-size:11px;margin-top:6px">Reconciles the algorithm's reported PnL against real wallet movement. "Untracked SOL" is inventory no fill explains (deposit/manual transfer), valued at spot.</div>
     </div>
   </div>
 </main>
@@ -1021,6 +1036,11 @@
       const reaCls = (r.realizedUsd || 0) >= 0 ? 'pos' : 'neg';
       const eq = r.equityEod != null ? '$' + fmt(r.equityEod) : '-';
       const pe = r.priceEod != null ? '$' + fmt(r.priceEod) : '-';
+      if (r.noData) {
+        return '<tr class="muted"><td>' + r.day + '</td>'
+          + '<td>-</td><td>-</td><td>-</td><td>-</td><td>0</td>'
+          + '<td>-</td><td>-</td><td>' + eq + '</td><td>' + pe + '</td></tr>';
+      }
       return '<tr><td>' + r.day + '</td>'
         + '<td class="' + netCls + '">' + sign(r.netUsd || 0) + '$' + fmt(Math.abs(r.netUsd || 0)) + '</td>'
         + '<td class="' + reaCls + '">' + sign(r.realizedUsd || 0) + '$' + fmt(Math.abs(r.realizedUsd || 0)) + '</td>'
@@ -1032,6 +1052,35 @@
         + '<td>' + eq + '</td>'
         + '<td>' + pe + '</td></tr>';
     }).join('');
+  }
+
+  async function loadAudit() {
+    try {
+      const res = await fetch('/api/audit');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const a = await res.json();
+      const setTxt = (id, txt, cls) => {
+        const el = document.getElementById(id);
+        el.textContent = txt;
+        if (cls) el.className = cls;
+      };
+      const sg = (v) => (v >= 0 ? '+' : '-') + '$' + fmt(Math.abs(v));
+      setTxt('auJournalFills', String(a.journalFills));
+      setTxt('auJournalRealized', sg(a.journalRealizedUsd), a.journalRealizedUsd >= 0 ? 'pos' : 'neg');
+      setTxt('auJournalFees', '$' + fmt(a.journalFeesUsd, 2));
+      setTxt('auLedgerFills', String(a.ledgerFills) + (a.ledgerCapped ? ' (capped)' : ''));
+      setTxt('auTracked', a.trackedQty != null ? fmt(a.trackedQty, 3) + ' SOL' : '-');
+      setTxt('auUntracked', a.untrackedQty != null ? fmt(a.untrackedQty, 3) + ' SOL' : '-');
+      setTxt('auBooksMatch', a.booksMatchChain ? 'OK' : 'MISMATCH', a.booksMatchChain ? 'pos' : 'neg');
+      setTxt('auChainSol', fmt(a.chainSol, 3) + ' SOL');
+      setTxt('auBasis', '$' + fmt(a.avgCostPerBase, 2));
+      const note = document.getElementById('auNote');
+      note.textContent = a.booksMatchChain
+        ? 'Books reconcile to the chain. Untracked SOL is inventory no fill explains (deposit/manual transfer), valued at spot.'
+        : '\u26a0 Books (' + fmt(a.booksSolQty, 3) + ' SOL) do not match chain (' + fmt(a.chainSol, 3) + ' SOL) - reconcile in progress.';
+    } catch (e) {
+      console.warn('[dash] audit load failed: ' + (e && e.message));
+    }
   }
 
   async function loadHistory() {
@@ -1055,6 +1104,8 @@
   });
   loadHistory();
   setInterval(loadHistory, 60000);
+  loadAudit();
+  setInterval(loadAudit, 60000);
 
   connect();
 </script>

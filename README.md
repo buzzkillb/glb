@@ -139,6 +139,31 @@ native SOL for fees) and a description of every runtime safety gate, is in
 - `scripts/` - smoke-test helpers
 - `.botstate/` - runtime state and event logs (git-ignored)
 
+### Trade journal and long-memory history
+
+To make the algorithm auditable over months (not just the last week), the bot
+writes two small append-only JSONL files under `.botstate/` and never prunes
+them:
+
+- `trades-<mode>.jsonl` - one raw fill per line (the full audit tape). The live
+  in-memory ledger is capped (~5000 fills), but this file keeps every fill
+  forever, so a year of trading is only a few hundred KB.
+- `equity-<mode>.jsonl` - coarse equity samples (one every 15 min), so the
+  equity curve survives past the ~7-day dashboard ring and long drawdowns stay
+  analyzable.
+
+On startup the bot replays that journal to rebuild every daily rollup in
+`history-sol.json`, so days the bot was offline (or fills that aged out of the
+ledger) are recovered rather than silently lost; offline days are written as
+explicit `noData` rows so the dashboard shows `-` instead of a misleading `$0`.
+
+The store also reconciles the SOL cost basis against the trade tape and the
+real on-chain balance: SOL that no fill explains (a deposit or manual transfer)
+is flagged as *untracked* and valued at market, which keeps the strategy books
+summing to the wallet. The **Accounting Audit** panel and `/api/audit` expose
+this reconciliation so the bot's reported PnL can be cross-checked against real
+wallet movement.
+
 ## Tests
 
 The test suite covers the important invariants: asset conservation, the grid

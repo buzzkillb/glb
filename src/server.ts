@@ -41,6 +41,11 @@ export class DashboardServer {
       res.json({ days: this.opts.history.rows() });
     });
 
+    // REST: accounting audit — journal vs chain vs books (measurement-only).
+    this.app.get('/api/audit', (_req, res) => {
+      res.json(this.opts.store.audit());
+    });
+
     // REST: pause/resume
     this.app.post('/api/pause', (_req, res) => {
       this.opts.store.paused = true;

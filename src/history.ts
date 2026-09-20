@@ -2,20 +2,22 @@
 // HISTORY ROLLUPS (SOL book only — memes/CYB excluded by design)
 //
 // Long-memory daily statistics for the dashboard History tab. The live trade
-// ledger only holds ~5000 fills and the equity ring ~7 days, so year-scale
-// views need a compact on-disk rollup: ONE JSON row per UTC day, appended
-// forever. A year of rows is a few KB.
+// ledger is capped (~5000 fills) and the equity ring is capped (~7 days), but
+// the forever journal (.botstate/trades-<mode>.jsonl) holds every fill, so
+// year-scale history is rebuilt from that tape rather than being lost when the
+// ledger overflows.
 //
 // Design rules:
 //  - Measurement only. Nothing here feeds trading decisions.
 //  - Deposits/withdrawals are external transfers, not trading profit. The bot
-//    cannot detect them directly, but equity deltas that have no matching
-//    realized PnL and no open-position change are almost always transfers.
-//    Rather than guess, we persist raw components (equityEod, realized, fees,
-//    fills, roundTrips) and let the UI compute profit honestly from realized
-//    minus fees. Equity deltas across a deposit simply show in the equity line.
-//  - Rows are recomputed for "today" from the live ledger each call and merged
-//    into the file, so intraday updates stay current; past days are immutable.
+//    cannot detect them directly. We persist raw components (equityEod,
+//    realized, fees, fills, roundTrips) and let the UI compute profit honestly
+//    from realized minus fees. Equity deltas across a deposit simply show in
+//    the equity line.
+//  - ROWS ARE REBUILT FROM THE JOURNAL at startup, so any day with fills is
+//    recovered even if the ledger has aged out or the bot was restarted. Days
+//    with no fills are marked `noData` instead of silently omitted, so the UI
+//    never renders a missing day as a misleading $0.
 //  - Crash-safe: the file is written atomically (tmp+rename) and any read/write
 //    failure degrades to empty stats, never throws into the trading loop.
 // ---------------------------------------------------------------------------
@@ -23,6 +25,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Trade } from './types.js';
+import { readJournal, readEquityArchive, type EquitySample } from './journal.js';
 
 const STATE_DIR = join(process.cwd(), '.botstate');
 const HISTORY_FILE = join(STATE_DIR, 'history-sol.json');
@@ -39,7 +42,7 @@ export interface DayRollup {
   netUsd: number;
   /** Total fills (buys+sells) across grid+dca. */
   fills: number;
-  /** Completed round-trips: sells whose realizedPnl closed a basis, counted per sell with realizedPnlUsd defined. */
+  /** Completed round-trips: sells whose realizedPnl closed a basis. */
   roundTrips: number;
   /** Average winning sell (USD) in the day. */
   avgWinUsd: number;
@@ -55,7 +58,7 @@ export interface DayRollup {
   sumWins: number;
   /** Gross losing USD (negative) this day. */
   sumLosses: number;
-  /** Σwins / |Σlosses| for the day; null when no losing sells (displayed as ∞). */
+  /** Σwins / |Σlosses| for the day; null when no losing sells. */
   profitFactor: number | null;
   /** Last equity sample of the day (USDC + SOL*price at day end). */
   equityEod: number | null;
@@ -63,11 +66,15 @@ export interface DayRollup {
   priceEod: number | null;
   /** First equity sample of the day (for the UI's day-over-day equity delta). */
   equityBod: number | null;
+  /** True when the bot recorded no SOL-book fills this day (idle/offline). */
+  noData: boolean;
+  /** Where the fill counts came from: live merge or journal replay. */
+  source: 'live' | 'journal';
 }
 
 interface HistoryFile {
-  version: 1;
-  /** Keyed by UTC day string. Today's row is recomputed/merged live. */
+  version: 2;
+  /** Keyed by UTC day string. */
   days: Record<string, DayRollup>;
 }
 
@@ -81,6 +88,7 @@ function emptyRow(day: string): DayRollup {
     avgWinUsd: 0, avgLossUsd: 0, winRate: 0, sells: 0, wins: 0, sumWins: 0, sumLosses: 0,
     profitFactor: null,
     equityEod: null, priceEod: null, equityBod: null,
+    noData: true, source: 'journal',
   };
 }
 
@@ -112,25 +120,29 @@ export function rollupDay(day: string, trades: Trade[]): DayRollup {
   row.sumLosses = sumLosses;
   row.winRate = sells ? wins / sells : 0;
   row.profitFactor = sumLosses < 0 ? sumWins / Math.abs(sumLosses) : (sumWins > 0 ? null : 0);
+  row.noData = row.fills === 0;
   return row;
 }
 
 /**
  * Daily history store: reads/merges/writes .botstate/history-sol.json.
- * Pass today's ledger + equity tail; returns all rows sorted by day.
+ *
+ * `update()` merges today's live ledger; `rebuildFromJournal()` replays the
+ * forever journal at startup so every day that ever had fills is recovered,
+ * and annotates equity endpoints from the combined ring + archive.
  */
 export class HistoryStore {
   private days: Record<string, DayRollup> = {};
 
-  constructor() {
+  constructor(private mode: 'paper' | 'live') {
     this.load();
   }
 
   private load(): void {
     try {
       if (existsSync(HISTORY_FILE)) {
-        const raw = JSON.parse(readFileSync(HISTORY_FILE, 'utf8')) as HistoryFile;
-        if (raw && raw.version === 1 && typeof raw.days === 'object') {
+        const raw = JSON.parse(readFileSync(HISTORY_FILE, 'utf8')) as { version?: number; days?: Record<string, DayRollup> };
+        if (raw && typeof raw.days === 'object') {
           this.days = raw.days;
         }
       }
@@ -142,7 +154,7 @@ export class HistoryStore {
   private save(): void {
     try {
       mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-      const payload: HistoryFile = { version: 1, days: this.days };
+      const payload: HistoryFile = { version: 2, days: this.days };
       const tmp = HISTORY_FILE + '.tmp';
       writeFileSync(tmp, JSON.stringify(payload), { encoding: 'utf8', mode: 0o600 });
       renameSync(tmp, HISTORY_FILE); // atomic on POSIX
@@ -151,25 +163,118 @@ export class HistoryStore {
     }
   }
 
+  /** Attach equity/price endpoints from any available sample source. */
+  private applyEquityEndpoints(extra: EquitySample[]): void {
+    const samples: EquitySample[] = [];
+    // Prefer the persisted equity archive (long horizon); de-dupe by ts.
+    try {
+      samples.push(...readEquityArchive(this.mode));
+    } catch { /* archive optional */ }
+    samples.push(...extra);
+    const byDay = new Map<string, EquitySample[]>();
+    for (const s of samples) {
+      const d = utcDay(s.ts);
+      const arr = byDay.get(d) ?? [];
+      arr.push(s);
+      byDay.set(d, arr);
+    }
+    for (const [d, arr] of byDay) {
+      const row = this.days[d];
+      if (!row) continue;
+      arr.sort((a, b) => a.ts - b.ts);
+      const bod = arr[0]!.equityUsd;
+      const eod = arr[arr.length - 1]!.equityUsd;
+      // Only fill when we don't already have a better (live) reading.
+      if (row.equityBod == null) row.equityBod = bod;
+      if (row.equityEod == null) row.equityEod = eod;
+    }
+  }
+
   /**
-   * Recompute today's row from the live ledger, merge equity endpoints from
-   * the sampled curve, persist, and return every day sorted ascending.
+   * Replay the forever journal and rebuild every day that has fills. This is
+   * what recovers history older than the ledger cap and backfills days the
+   * rollup missed while the bot was down. Returns the number of days touched.
+   */
+  rebuildFromJournal(equityExtra: { ts: number; equityUsd: number }[] = []): number {
+    let journal: Trade[] = [];
+    try {
+      journal = readJournal(this.mode);
+    } catch {
+      return 0;
+    }
+    if (!journal.length) {
+      this.applyEquityEndpoints(equityExtra);
+      return 0;
+    }
+    const byDay = new Map<string, Trade[]>();
+    for (const t of journal) {
+      if (t.strategyId !== 'grid' && t.strategyId !== 'dca') continue;
+      const d = utcDay(t.ts);
+      const arr = byDay.get(d) ?? [];
+      arr.push(t);
+      byDay.set(d, arr);
+    }
+    let touched = 0;
+    for (const [d, trades] of byDay) {
+      const row = rollupDay(d, trades);
+      row.source = 'journal';
+      // Preserve any previously stored (live) equity endpoints only if the
+      // rebuild has none — the trade stats are what must come from the tape.
+      const prior = this.days[d];
+      if (prior) {
+        if (row.equityBod == null) row.equityBod = prior.equityBod;
+        if (row.equityEod == null) row.equityEod = prior.equityEod;
+        if (row.priceEod == null) row.priceEod = prior.priceEod;
+      }
+      this.days[d] = row;
+      touched++;
+    }
+    this.applyEquityEndpoints(equityExtra);
+    this.fillInteriorGaps();
+    this.save();
+    return touched;
+  }
+
+  /**
+   * Materialize explicit `noData` rows for calendar days strictly between the
+   * first and last journaled day that have no fills. Without this, an offline
+   * stretch simply vanishes from the table and the operator can't tell it apart
+   * from "we chose not to record". Equity endpoints remain null -> rendered "-".
+   */
+  private fillInteriorGaps(): void {
+    const filled = Object.keys(this.days).sort();
+    if (filled.length < 2) return;
+    const start = Date.parse(filled[0]! + 'T00:00:00Z');
+    const end = Date.parse(filled[filled.length - 1]! + 'T00:00:00Z');
+    const MS = 86_400_000;
+    for (let t = start + MS; t < end; t += MS) {
+      const d = utcDay(t);
+      if (!this.days[d]) this.days[d] = emptyRow(d);
+    }
+  }
+
+  /**
+   * Recompute today's row from the live ledger, merge equity endpoints from the
+   * sampled curve, persist, and return every day sorted ascending.
    */
   update(
     trades: Trade[],
-    equityHistory: { ts: number; equityUsd: number }[],
-    lastPrice: number
+    equityHistory: { ts: number; equityUsd: number }[]
   ): DayRollup[] {
     const today = utcDay(Date.now());
     const row = rollupDay(today, trades);
-    // Equity endpoints from the 7-day ring when available (today's row only).
+    row.source = 'live';
     const samples = equityHistory.filter((p) => utcDay(p.ts) === today);
     if (samples.length) {
-      row.equityBod = samples[0].equityUsd;
-      row.equityEod = samples[samples.length - 1].equityUsd;
-      row.priceEod = lastPrice > 0 ? lastPrice : row.priceEod;
+      row.equityBod = samples[0]!.equityUsd;
+      row.equityEod = samples[samples.length - 1]!.equityUsd;
     }
+    // Keep a previously-known body value; only overwrite when we have one.
+    const prior = this.days[today];
+    if (row.equityBod == null && prior?.equityBod != null) row.equityBod = prior.equityBod;
+    if (row.priceEod == null && prior?.priceEod != null) row.priceEod = prior.priceEod;
     this.days[today] = row;
+    this.applyEquityEndpoints(equityHistory);
     this.save();
     return this.rows();
   }

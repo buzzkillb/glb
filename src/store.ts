@@ -14,8 +14,21 @@ import type {
   PerfBook,
 } from './types.js';
 import { notify } from './notify.js';
+import {
+  appendJournal,
+  appendEquityArchive,
+  readJournal,
+  seedJournalFromLedger,
+  reconcileCostBasis,
+  distributeUntracked,
+  type FillEntry,
+  type CostBasisResult,
+} from './journal.js';
 
 const STATE_DIR = join(process.cwd(), '.botstate');
+
+/** Coarse cadence for the forever equity archive (15 min). */
+const EQUITY_ARCHIVE_MS = 15 * 60_000;
 
 /** Downsample a time series to at most `max` points, keeping the last point. */
 function decimate<T>(arr: T[], max: number): T[] {
@@ -55,6 +68,10 @@ export class StateStore extends EventEmitter {
   /** Last real market context from the engine, so REST/plain snapshots also
    *  surface live VWAP + 24h range instead of falling back to zeros. */
   private lastMarket: { vwap: number; high24h: number; low24h: number; price24hAgo: number };
+  /** Throttle for the forever equity archive (one coarse sample / 15 min). */
+  private lastEquityArchiveAt = 0;
+  /** Last cost-basis reconciliation result (for the accountability audit UI). */
+  private lastCostBasis?: CostBasisResult;
 
   constructor(private cfg: AppConfig) {
     super();
@@ -95,6 +112,23 @@ export class StateStore extends EventEmitter {
     // CRASH RECOVERY: reconcile any previously-persisted runtime state (same
     // mode) so a restart keeps positions/pnl/trailing signals instead of resetting.
     this.loadPersisted();
+    // FOREVER JOURNAL: seed the append-only audit trail from whatever fills
+    // the ledger still holds, so history predating this upgrade is not lost.
+    this.initJournal();
+  }
+
+  /**
+   * Seed the forever trade journal from the in-memory ledger (idempotent) and
+   * reconcile the persisted SOL cost basis against the real trade tape.
+   * Called once at startup. Measurement only — never throws.
+   */
+  private initJournal(): void {
+    try {
+      const seeded = seedJournalFromLedger(this.cfg.mode, this.trades);
+      if (seeded > 0) console.log(`[journal] seeded ${seeded} historical fills into the forever journal`);
+    } catch (e) {
+      console.warn(`[journal] seed failed: ${(e as Error).message}`);
+    }
   }
 
   private initialBalances(): { SOL: number; USDC: number } {
@@ -199,6 +233,9 @@ export class StateStore extends EventEmitter {
 
   recordTrade(trade: Trade): void {
     this.trades.unshift(trade);
+    // FOREVER JOURNAL: mirror every fill into the append-only JSONL audit
+    // trail so history survives the 5000-fill ledger cap. Best-effort.
+    appendJournal(this.cfg.mode, [trade]);
     // Maintain a cumulative running fee total so the dashboard never loses fees
     // once trades age out of the visible snapshot window.
     if (trade.feeUsd) this.account.feesPaidUsd += trade.feeUsd;
@@ -281,6 +318,9 @@ export class StateStore extends EventEmitter {
         pauseReason: this.pauseReason,
       },
       perf: this.computePerf(cfg),
+      // ACCOUNTABILITY AUDIT: journal vs chain vs books, so the operator can
+      // verify the algorithm's reported PnL against real wallet movement.
+      audit: this.audit(),
       // Chart payload: decimate the full 7-day ring to ~600 points so the
       // dashboard shows the whole week without a megabyte per update.
       equityHistory: decimate(this.equityHistory, 600),
@@ -322,10 +362,135 @@ export class StateStore extends EventEmitter {
     if (last && now - last.ts < 5000) return; // dedupe within a poll window
     const stable = this.account.balances.USDC ?? 0;
     const nativeSolUsd = (this.account.balances.SOL ?? 0) * this.price;
-    this.equityHistory.push({ ts: now, equityUsd: stable + nativeSolUsd });
+    const sample = { ts: now, equityUsd: stable + nativeSolUsd };
+    this.equityHistory.push(sample);
     if (this.equityHistory.length > this.maxEquityPoints) {
       this.equityHistory = this.equityHistory.slice(-this.maxEquityPoints);
     }
+    // FOREVER ARCHIVE: persist a coarse (15-min) equity sample so the curve
+    // survives past the 7-day ring and long-horizon drawdowns are analysable.
+    if (now - this.lastEquityArchiveAt >= EQUITY_ARCHIVE_MS) {
+      this.lastEquityArchiveAt = now;
+      appendEquityArchive(this.cfg.mode, sample);
+    }
+  }
+
+  /**
+   * Reconcile the persisted aggregate + per-strategy SOL cost basis against the
+   * real trade tape and the on-chain balance.
+   *
+   * Fixes the accounting drift where avgCostPerBase only moved on tracked fills
+   * (and defaulted to spot) while basis removal used a proportional quoteQty
+   * shrink — so the book basis ($109.56) diverged from the tape (~$105) and from
+   * the chain inventory. The honest basis is:
+   *   (trade-attributable remaining cost + untracked SOL at market) / total SOL.
+   * SOL with no matching fills (deposits/manual transfers) is explicitly valued
+   * at spot and attributed to the strategies that hold inventory, so books and
+   * chain reconcile and unrealized PnL stops lying. Measurement-only: this only
+   * rewrites cost basis, never quantities or realized PnL.
+   */
+  reconcileCostBasisFromJournal(spotPrice: number): CostBasisResult | undefined {
+    try {
+      const pos = this.getPosition('SOL', 'USDC');
+      if (!pos || !(spotPrice > 0)) return undefined;
+      const chainQty = this.account.balances.SOL ?? pos.baseQty;
+      if (!(chainQty > 0)) return undefined;
+      const fills: FillEntry[] = readJournal(this.cfg.mode)
+        .filter((t) => t.strategyId === 'grid' || t.strategyId === 'dca')
+        .map((t) => ({
+          ts: t.ts,
+          direction: t.direction,
+          baseQty: t.baseQty,
+          quoteQty: t.quoteQty,
+        }));
+      if (!fills.length) return undefined;
+      const res = reconcileCostBasis(fills, chainQty, spotPrice);
+      const prior = pos.avgCostPerBase;
+      pos.avgCostPerBase = res.avgCostPerBase;
+      pos.baseQty = chainQty;
+      this.upsertPosition(pos);
+      // Per-strategy books: keep their own tape-derived basis, then distribute
+      // the untracked (deposit/manual) SOL pro-rata so sum(books) === chain and
+      // the grid cost-guard reads an honest number.
+      const gBook = this.strategies.grid.subBook;
+      const dBook = this.strategies.dca.subBook;
+      const weights: Record<string, number> = {
+        grid: gBook?.baseQty ?? 0,
+        dca: dBook?.baseQty ?? 0,
+      };
+      const share = distributeUntracked(weights, res.untrackedQty);
+      for (const [id, qty] of Object.entries(share)) {
+        const book = id === 'grid' ? gBook : dBook;
+        if (!book) continue;
+        const total = book.baseQty + qty;
+        if (total <= 0) continue;
+        // Untracked SOL is assumed acquired at the current market price.
+        book.avgCostPerBase =
+          (book.baseQty * book.avgCostPerBase + qty * spotPrice) / total;
+        book.baseQty = total;
+      }
+      this.lastCostBasis = res;
+      if (Math.abs(prior - res.avgCostPerBase) > 1e-6) {
+        console.log(
+          `[reconcile] cost basis ${prior.toFixed(4)} -> ${res.avgCostPerBase.toFixed(4)} ` +
+          `(tracked ${res.trackedQty.toFixed(3)} + untracked ${res.untrackedQty.toFixed(3)} SOL)`
+        );
+      }
+      return res;
+    } catch (e) {
+      console.warn(`[reconcile] cost-basis failed: ${(e as Error).message}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Accounting audit (measurement-only): does the recorded tape explain the
+   * on-chain inventory and the equity movement? Surface this to the operator so
+   * "the algo reports +$X" can be cross-checked against real wallet movement.
+   */
+  audit(): Snapshot['audit'] {
+    const pos = this.getPosition('SOL', 'USDC');
+    const chainSol = this.account.balances.SOL ?? 0;
+    const chainUsdc = this.account.balances.USDC ?? 0;
+    const equity = chainUsdc + chainSol * (this.price || 0);
+    const journal = readJournal(this.cfg.mode);
+    let buys = 0, sells = 0, buyUsd = 0, sellUsd = 0, realized = 0, fees = 0;
+    for (const t of journal) {
+      if (t.strategyId !== 'grid' && t.strategyId !== 'dca') continue;
+      fees += t.feeUsd || 0;
+      if (t.direction === 'BUY') { buys++; buyUsd += t.quoteQty || 0; }
+      else {
+        sells++; sellUsd += t.quoteQty || 0;
+        realized += t.realizedPnlUsd ?? 0;
+      }
+    }
+    const basis = this.lastCostBasis;
+    const booksSum =
+      (this.strategies.grid.subBook?.baseQty ?? 0) + (this.strategies.dca.subBook?.baseQty ?? 0);
+    return {
+      journalFills: journal.length,
+      journalBuys: buys,
+      journalSells: sells,
+      journalBuyUsd: buyUsd,
+      journalSellUsd: sellUsd,
+      journalRealizedUsd: realized,
+      journalFeesUsd: fees,
+      ledgerFills: this.trades.length,
+      ledgerCapped: this.trades.length >= this.maxTrades,
+      chainSol,
+      chainUsdc,
+      equityUsd: equity,
+      positionBaseQty: pos?.baseQty ?? 0,
+      avgCostPerBase: pos?.avgCostPerBase ?? 0,
+      trackedQty: basis?.trackedQty ?? null,
+      untrackedQty: basis?.untrackedQty ?? null,
+      booksSolQty: booksSum,
+      booksMatchChain: Math.abs(booksSum - chainSol) < 1e-3,
+      equityRingStartUsd: this.equityHistory[0]?.equityUsd ?? null,
+      equityRingSpanHours: this.equityHistory.length
+        ? (this.equityHistory[this.equityHistory.length - 1]!.ts - this.equityHistory[0]!.ts) / 3_600_000
+        : 0,
+    };
   }
 
   // ---------------------------------------------------------------------------

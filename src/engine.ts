@@ -153,6 +153,13 @@ export class StrategyEngine {
     if (this.cfg.mode === 'live' && this.broker instanceof LiveBroker) {
       await this.broker.syncBalances();
       await this.broker.syncPosition(this.store.price);
+      // HONEST BASIS: after balances are read, reconcile the SOL cost basis
+      // against the forever journal so unrealized PnL and the grid cost-guard
+      // use a number that actually matches the tape + chain. Measurement-only:
+      // rewrites cost basis, never quantities or realized PnL.
+      try {
+        this.store.reconcileCostBasisFromJournal(this.store.price);
+      } catch { /* measurement only — never crash the loop */ }
     }
 
     // STALE-PRICE SAFETY: if the source went down and we can't refresh, stop
