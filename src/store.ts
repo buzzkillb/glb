@@ -409,17 +409,23 @@ export class StateStore extends EventEmitter {
       pos.avgCostPerBase = res.avgCostPerBase;
       pos.baseQty = chainQty;
       this.upsertPosition(pos);
-      // Per-strategy books: keep their own tape-derived basis, then distribute
-      // the untracked (deposit/manual) SOL pro-rata so sum(books) === chain and
-      // the grid cost-guard reads an honest number.
+      // Per-strategy books: keep their own tape-derived basis, then attribute
+      // any *deficit* between the books and the chain (usually untracked
+      // deposit SOL, or native-SOL fees the engine later trims) pro-rata at
+      // spot. Distributing only the deficit — never the full untracked amount —
+      // keeps sum(books) === chain even when the engine's own reconcile has
+      // already trimmed the books to the wallet.
       const gBook = this.strategies.grid.subBook;
       const dBook = this.strategies.dca.subBook;
+      const booksSum = (gBook?.baseQty ?? 0) + (dBook?.baseQty ?? 0);
+      const deficit = Math.max(0, chainQty - booksSum);
       const weights: Record<string, number> = {
         grid: gBook?.baseQty ?? 0,
         dca: dBook?.baseQty ?? 0,
       };
-      const share = distributeUntracked(weights, res.untrackedQty);
+      const share = distributeUntracked(weights, deficit);
       for (const [id, qty] of Object.entries(share)) {
+        if (qty <= 0) continue;
         const book = id === 'grid' ? gBook : dBook;
         if (!book) continue;
         const total = book.baseQty + qty;
@@ -430,7 +436,7 @@ export class StateStore extends EventEmitter {
         book.baseQty = total;
       }
       this.lastCostBasis = res;
-      if (Math.abs(prior - res.avgCostPerBase) > 1e-6) {
+      if (Math.abs(prior - res.avgCostPerBase) / (res.avgCostPerBase || 1) > 0.005) {
         console.log(
           `[reconcile] cost basis ${prior.toFixed(4)} -> ${res.avgCostPerBase.toFixed(4)} ` +
           `(tracked ${res.trackedQty.toFixed(3)} + untracked ${res.untrackedQty.toFixed(3)} SOL)`
