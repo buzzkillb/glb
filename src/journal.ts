@@ -68,10 +68,21 @@ export function appendJournal(mode: 'paper' | 'live', trades: Trade[]): void {
 }
 
 /**
- * Read the entire journal, deduped by trade id. Corrupt lines are skipped so
- * one bad append can never hide the rest of the history.
+ * True for fills that never touched the wallet: the smoke-test script books
+ * synthetic SELLs at a hardcoded price (orderId 'test-sell') directly into the
+ * live store. When those reach the journal they inflate realized PnL and skew
+ * every rollup, so analysis must exclude them.
  */
-export function readJournal(mode: 'paper' | 'live'): Trade[] {
+export function isSyntheticFill(t: Trade): boolean {
+  return (t.orderId ?? '').startsWith('test');
+}
+
+/**
+ * Read the entire journal, deduped by trade id. Corrupt lines are skipped so
+ * one bad append can never hide the rest of the history. Synthetic test fills
+ * are excluded by default so analytics reflect only real on-chain activity.
+ */
+export function readJournal(mode: 'paper' | 'live', opts: { includeSynthetic?: boolean } = {}): Trade[] {
   const file = journalPath(mode);
   if (!existsSync(file)) return [];
   const seen = new Set<string>();
@@ -83,6 +94,7 @@ export function readJournal(mode: 'paper' | 'live'): Trade[] {
       try {
         const t = JSON.parse(trimmed) as Trade;
         if (!t || typeof t.ts !== 'number' || typeof t.baseQty !== 'number') continue;
+        if (isSyntheticFill(t) && !opts.includeSynthetic) continue;
         if (t.id && seen.has(t.id)) continue;
         if (t.id) seen.add(t.id);
         out.push(t);
@@ -103,7 +115,7 @@ export function readJournal(mode: 'paper' | 'live'): Trade[] {
  */
 export function seedJournalFromLedger(mode: 'paper' | 'live', trades: Trade[]): number {
   if (!trades.length) return 0;
-  const existing = new Set(readJournal(mode).map((t) => t.id));
+  const existing = new Set(readJournal(mode, { includeSynthetic: true }).map((t) => t.id));
   const missing = trades.filter((t) => t.id && !existing.has(t.id));
   if (missing.length) {
     // Oldest first so the journal stays chronological for tape replay.

@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { reconcileCostBasis, distributeUntracked, type FillEntry } from '../src/journal.js';
+import { reconcileCostBasis, distributeUntracked, isSyntheticFill, type FillEntry } from '../src/journal.js';
 
 const DAY = 86_400_000;
 
@@ -70,4 +70,10 @@ test('distributeUntracked handles empty books without dividing by zero', () => {
   const out = distributeUntracked({ grid: 0, dca: 0 }, 5);
   assert.equal(out.grid, 0);
   assert.equal(out.dca, 0);
+});
+
+test('isSyntheticFill flags smoke-test fills and journal reads exclude them', () => {
+  assert.equal(isSyntheticFill({ orderId: 'test-sell' } as any), true);
+  assert.equal(isSyntheticFill({ orderId: '3061be2f-a770-4d0e' } as any), false);
+  assert.equal(isSyntheticFill({} as any), false);
 });

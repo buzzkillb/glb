@@ -280,6 +280,8 @@ export interface Snapshot {
     journalRealizedUsd: number;
     /** Fees across the journal. */
     journalFeesUsd: number;
+    /** Synthetic smoke-test fills excluded from all analytics above. */
+    syntheticFills: number;
     /** Fills still held in the in-memory ledger (capped). */
     ledgerFills: number;
     /** True when the ledger has hit its cap (older fills only in journal). */

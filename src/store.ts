@@ -21,6 +21,7 @@ import {
   seedJournalFromLedger,
   reconcileCostBasis,
   distributeUntracked,
+  isSyntheticFill,
   type FillEntry,
   type CostBasisResult,
 } from './journal.js';
@@ -461,7 +462,9 @@ export class StateStore extends EventEmitter {
     const equity = chainUsdc + chainSol * (this.price || 0);
     const journal = readJournal(this.cfg.mode);
     let buys = 0, sells = 0, buyUsd = 0, sellUsd = 0, realized = 0, fees = 0;
-    for (const t of journal) {
+    let synthetic = 0;
+    for (const t of readJournal(this.cfg.mode, { includeSynthetic: true })) {
+      if (isSyntheticFill(t)) { synthetic++; continue; }
       if (t.strategyId !== 'grid' && t.strategyId !== 'dca') continue;
       fees += t.feeUsd || 0;
       if (t.direction === 'BUY') { buys++; buyUsd += t.quoteQty || 0; }
@@ -481,6 +484,7 @@ export class StateStore extends EventEmitter {
       journalSellUsd: sellUsd,
       journalRealizedUsd: realized,
       journalFeesUsd: fees,
+      syntheticFills: synthetic,
       ledgerFills: this.trades.length,
       ledgerCapped: this.trades.length >= this.maxTrades,
       chainSol,
