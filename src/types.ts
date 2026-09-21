@@ -1,4 +1,4 @@
-import type { GridConfig, DcaConfig, MemeSlotConfig } from './config.js';
+import type { GridConfig, DcaConfig, MemeSlotConfig, PerpSleeveConfig } from './config.js';
 
 export type Side = 'BUY' | 'SELL';
 
@@ -201,6 +201,79 @@ export interface StrategyRuntimeState {
   grid: GridState;
   dca: DcaState;
   memes: Record<string, MemeState>;
+  /** PERPS SLEEVE (risk-isolated leverage overlay). Always present so the
+   *  dashboard/API has a home for it even when disabled. */
+  perps: PerpsState;
+}
+
+/**
+ * Dashboard view of the perps sleeve. Measurement/observability only — the
+ * sleeve's authoritative ledger lives in `.botstate/perps-<mode>.json` and is
+ * deliberately separate from the spot book.
+ */
+export interface PerpsState {
+  enabled: boolean;
+  halted: boolean;
+  haltReason: string;
+  /** Sane mark price from the perps venue feed (0 = none/rejected). */
+  markPrice: number;
+  markHealthy: boolean;
+  feedRejectReason: string;
+  /** Untouchable principal floor: the sleeve may only deploy equity ABOVE this. */
+  principalFloorUsd: number;
+  /** Peak equity observed (observability only). */
+  peakEquityUsd: number;
+  /** Margin currently committed to an open position. */
+  outstandingMarginUsd: number;
+  /** max(0, equity - floor): the only profit the sleeve may ever risk. */
+  eligibleProfitUsd: number;
+  /**
+   * DYNAMIC profit signal derived from the bot's own persisted records
+   * (equity archive + trade journal). This is what sizes the sleeve live, with
+   * no hardcoded floor. null-safe fields default to 0/'' when unavailable.
+   */
+  profit: {
+    /** Equity at the earliest point in our own record (never a literal). */
+    baselineEquityUsd: number;
+    baselineSource: 'archive' | 'journal' | 'none';
+    /** max(0, equity - baseline): genuinely earned net profit. */
+    newProfitUsd: number;
+    /** Liquid USDC — the only money that can be posted as perp margin. */
+    freeCashUsd: number;
+    /** Lifetime banked realized PnL from the trade tape. */
+    lifetimeRealizedUsd: number;
+    /** Realized PnL inside the trailing window. */
+    windowRealizedUsd: number;
+    /** Non-synthetic fills on the tape (confidence signal). */
+    sampleFills: number;
+    ready: boolean;
+    note: string;
+  };
+  sleeveBudgetUsd: number;
+  /** sleeveBudgetUsd / equity, 0..1 */
+  edgePct: number;
+  /** Grid-owned SOL inventory valued at mark (the thing a hedge neutralizes). */
+  gridNetLongUsd: number;
+  /** gridNetLongUsd / equity, 0..1 */
+  exposurePct: number;
+  hedgeActive: boolean;
+  hedgeCoveragePct: number;
+  realizedPnlUsd: number;
+  feesPaidUsd: number;
+  open: {
+    side: 'long' | 'short';
+    collateralUsd: number;
+    leverage: number;
+    entryPriceUsd: number;
+    liquidationPriceUsd: number;
+    notionalUsd: number;
+    openedAt: number;
+  } | null;
+  /** For a short: (liquidation - mark)/mark as a fraction; positive = safe. */
+  liquidationBufferPct: number;
+  /** Human-readable reason for the last sizing decision (why it did/didn't act). */
+  lastDecision: string;
+  note: string;
 }
 
 export interface Snapshot {
@@ -215,6 +288,7 @@ export interface Snapshot {
     grid: GridConfig;
     dca: DcaConfig;
     memes: MemeSlotConfig[];
+    perps: PerpSleeveConfig;
   };
   /**
    * PERFORMANCE TELEMETRY (measurement-only). `books` is the 24h rolling

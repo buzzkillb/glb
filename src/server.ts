@@ -17,6 +17,8 @@ export interface DashboardServerOptions {
   /** Shared daily-history store (SOL book) for the History tab. */
   history: HistoryStore;
   port: number;
+  /** Optional perps-ledger reader (open/close/halt/reject tape). */
+  perpsLedger?: () => unknown;
 }
 
 /**
@@ -44,6 +46,29 @@ export class DashboardServer {
     // REST: accounting audit — journal vs chain vs books (measurement-only).
     this.app.get('/api/audit', (_req, res) => {
       res.json(this.opts.store.audit());
+    });
+
+    // REST: perps sleeve — profit-funded leverage overlay state + live quote.
+    // Isolated read; the sleeve's own ledger file is the source of truth.
+    this.app.get('/api/perps', (_req, res) => {
+      const snap = this.opts.store.snapshot(this.opts.cfg);
+      res.json({
+        perps: snap.strategies.perps,
+        config: snap.config.perps,
+        equityUsd: snap.audit.equityUsd,
+        // Cross-check: the sleeve can NEVER deploy more than its own budget.
+        budgetWithinCap:
+          snap.strategies.perps.sleeveBudgetUsd <=
+          Math.max(0, snap.strategies.perps.eligibleProfitUsd),
+      });
+    });
+
+    // REST: perps ledger history (open/close/halt/reject tape) for the tab.
+    // Preferred path is the store-injected provider (wired by the engine); the
+    // option remains for callers that construct the server directly.
+    this.app.get('/api/perps/ledger', (_req, res) => {
+      const provider = this.opts.perpsLedger ?? this.opts.store.perpsLedgerProvider;
+      res.json(provider ? provider() : { history: [] });
     });
 
     // REST: pause/resume

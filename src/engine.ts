@@ -7,6 +7,7 @@ import { GridStrategy } from './gridStrategy.js';
 import { DcaStrategy } from './dcaStrategy.js';
 
 import { MemeStrategy } from './meme.js';
+import { PerpSleeve } from './perpSleeve.js';
 import { WalletSizer } from './sizer.js';
 import { JupiterExec, killLiveExecution, clearLiveExecution, liveExecutionKilled, dryRunEnabled } from './jupiter.js';
 import { notify } from './notify.js';
@@ -36,6 +37,9 @@ export class StrategyEngine {
   private gridHandled = new Set<string>();
   private stalePolls = 0;
   private memes: MemeStrategy[] = [];
+  /** PERPS SLEEVE: profit-funded leverage overlay. Reads spot sub-books to
+   *  size a hedge, writes only to its own isolated ledger. */
+  private perps?: PerpSleeve;
   private signer?: Keypair;
   private sizer?: WalletSizer;
   /** True while a tick is still in flight. Guards against overlapping ticks if
@@ -83,6 +87,14 @@ export class StrategyEngine {
         (slot) =>
           new MemeStrategy(cfg, store, slot, cfg.mode === 'live' ? this.broker : undefined)
       );
+
+    // PERPS SLEEVE (off unless PERPS_ENABLED=1). Constructed always so the
+    // dashboard has a live view (feed health, budget) even while disabled.
+    this.perps = new PerpSleeve(cfg, store, signer);
+    // Expose the sleeve's read-only view to the snapshot/dashboard. Isolated,
+    // measurement-only: it never lets the sleeve write to the spot book.
+    store.perpsProvider = () => this.perps!.view();
+    store.perpsLedgerProvider = () => this.perps!.ledgerView();
   }
 
   start(): void {
@@ -231,6 +243,17 @@ export class StrategyEngine {
 
     // Run DCA
     this.dca.tick();
+
+    // PERPS SLEEVE: only when enabled. Runs AFTER grid/DCA so it sizes the
+    // hedge against the *current* grid inventory, and isolated so any failure
+    // here can never interrupt the spot book.
+    if (this.perps && this.cfg.strategies.perps?.enabled) {
+      try {
+        await this.perps.tick();
+      } catch (e) {
+        console.warn(`[perps] tick error (spot book unaffected): ${(e as Error).message}`);
+      }
+    }
 
     // Risk: hard stop
     this.applyHardStop();

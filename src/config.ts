@@ -161,6 +161,92 @@ export interface StrategyConfig {
   grid: GridConfig;
   dca: DcaConfig;
   memes: MemeSlotConfig[];
+  perps: PerpSleeveConfig;
+}
+
+/**
+ * Perps sleeve configuration.
+ *
+ * The sleeve is a profit-funded, risk-isolated overlay on the spot book. It can
+ * ONLY deploy profit above a ratcheting high-water mark, so base capital is
+ * never at risk. Defaults are conservative and the sleeve is OFF unless
+ * PERPS_ENABLED=1 is set deliberately.
+ */
+/** Conservative default used when a caller builds a config without a perps
+ *  block (e.g. minimal test fixtures). Disabled, so it is inert by default. */
+export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
+  enabled: false,
+  profitSharePct: 0.5,
+  cashUsePct: 0.5,
+  // Fraction of the sleeve's OWN banked realized PnL (read live from the trade
+  // tape) that is deployable. 0 disables the realized-PnL funding path.
+  realizedProfitUsePct: 0.5,
+  // Trailing window (hours) for the windowed-realized profit signal.
+  profitWindowHours: 168,
+  // Minimum real fills before the tape is trusted enough to size from.
+  minFillsForConfidence: 8,
+  // Venue cost model for the paper/live estimate (open/close fee, hourly borrow).
+  openFeePct: 0.0006,
+  hourlyBorrowPct: 0.000006,
+  maxEquityPct: 0.1,
+  maxMarginUsd: 250,
+  maxLeverage: 3,
+  hedgeRatio: 0.8,
+  hedgeTriggerPct: 0.15,
+  stopLossMarginPct: 0.25,
+  maxLossUsd: 75,
+  overlayEnabled: false,
+  overlayBudgetPct: 0.5,
+  baselineEquityUsd: 0,
+  apiUrl: 'https://perps-api.jup.ag/v1',
+  slippageBps: 100,
+};
+
+export interface PerpSleeveConfig {
+  enabled: boolean;
+  /** Fraction of eligible profit (equity above the floor) deployable. */
+  profitSharePct: number;
+  /** Fraction of *liquid USDC* deployable — SOL inventory cannot post margin. */
+  cashUsePct: number;
+  /**
+   * Deployable fraction of the sleeve's OWN banked realized PnL (read live from
+   * the trade tape). This is the "+$521.10 since inception" path — realized PnL
+   * already banked, so it is safe to risk on a hedge. 0 disables it. Never
+   * negative, never exceeds liquid cash.
+   */
+  realizedProfitUsePct: number;
+  /** Trailing window (hours) for the windowed-realized signal. */
+  profitWindowHours: number;
+  /** Confidence floor: minimum real fills before the tape is trusted to size. */
+  minFillsForConfidence: number;
+  /** Venue open/close fee as a fraction of notional (cost model). */
+  openFeePct: number;
+  /** Venue hourly borrow rate as a fraction of notional (cost model). */
+  hourlyBorrowPct: number;
+  /** Absolute cap on sleeve margin as a fraction of equity. */
+  maxEquityPct: number;
+  /** Hard USD ceiling on margin regardless of equity. */
+  maxMarginUsd: number;
+  /** Leverage ceiling (2-3 recommended). */
+  maxLeverage: number;
+  /** Hedge: fraction of grid net-long delta to neutralize (0..1). */
+  hedgeRatio: number;
+  /** Hedge arms only when grid net-long exposure exceeds this fraction of equity. */
+  hedgeTriggerPct: number;
+  /** Stop is placed at this fraction of margin loss — must sit INSIDE liquidation. */
+  stopLossMarginPct: number;
+  /** Loss ceiling (USD): sleeve halts if its own realized loss breaches this. */
+  maxLossUsd: number;
+  /** Directional overlay (Tier 3). Off by default. */
+  overlayEnabled: boolean;
+  /** Fraction of sleeve budget the overlay may use. */
+  overlayBudgetPct: number;
+  /** Principal floor in USD. 0 = auto-seed to the first observed equity. */
+  baselineEquityUsd: number;
+  /** Jupiter Perps API base, e.g. https://perps-api.jup.ag/v1 */
+  apiUrl: string;
+  /** slippage ceiling in bps for perp open/close */
+  slippageBps: number;
 }
 
 export interface AppConfig {
@@ -275,6 +361,37 @@ export function loadConfig(): AppConfig {
           ],
         },
       ],
+      // PERPS SLEEVE (profit-funded, risk-isolated leverage overlay).
+      // OFF by default: PERPS_ENABLED must be set deliberately. Even when on,
+      // it deploys ONLY profit above a ratcheting high-water mark, so the spot
+      // grid/DCA book (base capital) is never at risk.
+      perps: {
+        enabled: envBool('PERPS_ENABLED', false),
+        profitSharePct: envNumber('PERPS_PROFIT_SHARE_PCT', 0.5, 0, 1),
+        // Only liquid USDC can be posted as margin; SOL is inventory.
+        cashUsePct: envNumber('PERPS_CASH_USE_PCT', 0.5, 0, 1),
+        // Fraction of banked realized PnL the sleeve may risk.
+        realizedProfitUsePct: envNumber('PERPS_REALIZED_USE_PCT', 0.5, 0, 1),
+        profitWindowHours: envNumber('PERPS_PROFIT_WINDOW_HOURS', 168, 1, 8760),
+        minFillsForConfidence: envNumber('PERPS_MIN_FILLS', 8, 0, 1e6),
+        openFeePct: envNumber('PERPS_OPEN_FEE_PCT', 0.0006, 0, 0.1),
+        hourlyBorrowPct: envNumber('PERPS_HOURLY_BORROW_PCT', 0.000006, 0, 0.01),
+        maxEquityPct: envNumber('PERPS_MAX_EQUITY_PCT', 0.1, 0, 1),
+        maxMarginUsd: envNumber('PERPS_MAX_MARGIN_USD', 250, 0, 1e9),
+        maxLeverage: envNumber('PERPS_MAX_LEVERAGE', 3, 1, 10),
+        hedgeRatio: envNumber('PERPS_HEDGE_RATIO', 0.8, 0, 1),
+        hedgeTriggerPct: envNumber('PERPS_HEDGE_TRIGGER_PCT', 0.15, 0, 1),
+        stopLossMarginPct: envNumber('PERPS_STOP_LOSS_MARGIN_PCT', 0.25, 0.01, 0.99),
+        maxLossUsd: envNumber('PERPS_MAX_LOSS_USD', 75, 0, 1e9),
+        overlayEnabled: envBool('PERPS_OVERLAY_ENABLED', false),
+        overlayBudgetPct: envNumber('PERPS_OVERLAY_BUDGET_PCT', 0.5, 0, 1),
+        // Untouchable principal. Set this to lock a specific principal amount;
+        // 0 auto-seeds to the first observed equity, so the sleeve must first
+        // EARN profit before it can deploy anything.
+        baselineEquityUsd: envNumber('PERPS_PRINCIPAL_FLOOR_USD', 0, 0, 1e12),
+        apiUrl: process.env.PERPS_API_URL || 'https://perps-api.jup.ag/v1',
+        slippageBps: envNumber('PERPS_SLIPPAGE_BPS', 100, 1, 2000),
+      },
     },
     risk: {
       maxUsdcPosition: envNumber('RISK_MAX_USDC', 400, 1, 1e9),

@@ -212,6 +212,7 @@
     <div class="tab active" data-tab="overview">Overview</div>
     <div class="tab" data-tab="sol">SOL Book</div>
     <div class="tab" data-tab="memes">Memes</div>
+    <div class="tab" data-tab="perps">Perps</div>
     <div class="tab" data-tab="history">History</div>
   </div>
 
@@ -383,6 +384,58 @@
     </div>
   </div>
   <!-- /memes -->
+  <!-- ============ PERPS SLEEVE ============ -->
+  <div class="tab-panel" id="panel-perps">
+    <div class="section">
+      <h2>Perps Sleeve <span class="muted">profit-funded · risk-isolated leverage overlay</span></h2>
+      <div id="perpsBanner" class="muted"></div>
+      <div class="row2">
+        <div class="card"><div class="k">Status</div><div class="v" id="pStatus">—</div></div>
+        <div class="card"><div class="k">Venue mark (SOL)</div><div class="v" id="pMark">—</div></div>
+      </div>
+      <div class="row2">
+        <div class="card"><div class="k">Principal floor (untouchable)</div><div class="v" id="pHwm">—</div></div>
+        <div class="card"><div class="k">Eligible profit</div><div class="v" id="pElig">—</div></div>
+      </div>
+      <div class="row2">
+        <div class="card"><div class="k">Sleeve budget</div><div class="v" id="pBudget">—</div></div>
+        <div class="card"><div class="k">Edge vs equity</div><div class="v" id="pEdge">—</div></div>
+      </div>
+      <div class="row2">
+        <div class="card"><div class="k">Profit baseline (dynamic)</div><div class="v" id="pBaseline">—</div></div>
+        <div class="card"><div class="k">New profit since baseline</div><div class="v" id="pNewProfit">—</div></div>
+      </div>
+      <div class="row2">
+        <div class="card"><div class="k">Free cash (USDC)</div><div class="v" id="pFreeCash">—</div></div>
+        <div class="card"><div class="k">Lifetime realized</div><div class="v" id="pLifeReal">—</div></div>
+      </div>
+      <div class="row2">
+        <div class="card"><div class="k">Window realized (7d)</div><div class="v" id="pWindowReal">—</div></div>
+        <div class="card"><div class="k">Tape fills (confidence)</div><div class="v" id="pFills">—</div></div>
+      </div>
+      <div class="row2">
+        <div class="card"><div class="k">Grid net-long</div><div class="v" id="pGridLong">—</div></div>
+        <div class="card"><div class="k">Exposure</div><div class="v" id="pExposure">—</div></div>
+      </div>
+      <div class="row2">
+        <div class="card"><div class="k">Position</div><div class="v" id="pPosition">—</div></div>
+        <div class="card"><div class="k">Liquidation buffer</div><div class="v" id="pLiq">—</div></div>
+      </div>
+      <div class="row2">
+        <div class="card"><div class="k">Sleeve realized PnL</div><div class="v" id="pPnl">—</div></div>
+        <div class="card"><div class="k">Sleeve fees</div><div class="v" id="pFees">—</div></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <div class="k">Last decision</div>
+        <div class="v" id="pDecision" style="font-size:14px">—</div>
+      </div>
+    </div>
+    <div class="section">
+      <h2>Perps Ledger Tape <span class="muted">open / close / halt / reject</span></h2>
+      <table id="perpsLedgerTable"><thead><tr><th>Time</th><th>Kind</th><th>Side</th><th>Collateral</th><th>Notional</th><th>PnL</th><th>Price</th><th>Note</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <!-- /perps -->
   <!-- ============ HISTORY ============ -->
   <div class="tab-panel" id="panel-history">
     <div class="section">
@@ -612,6 +665,7 @@
     safe(() => renderTrades(s));
     safe(() => renderPerf(s));
     safe(() => renderMemes(s));
+    safe(() => renderPerps(s));
 
     setStatus(s.risk.paused ? 'PAUSED' : 'running', s.risk.paused ? 'paused' : 'live');
   }
@@ -997,6 +1051,94 @@
     };
     mk(coords[0][0], coords[0][1] - 6, pts[0].equityEod, 'start');
     mk(coords[coords.length - 1][0], coords[coords.length - 1][1] - 6, pts[pts.length - 1].equityEod, 'end');
+  }
+
+  // ============ PERPS SLEEVE ============
+  // Renders the profit-funded leverage sleeve: budget, hedge exposure, open
+  // position, and the isolated ledger tape. Read-only; the sleeve's own ledger
+  // file is the source of truth and lives in a namespace separate from the spot book.
+  function renderPerps(s) {
+    const p = (s.strategies && s.strategies.perps) || {};
+    const money = (v) => (v < 0 ? '-$' : '$') + fmt(Math.abs(v || 0), 2);
+    const pctv = (v) => ((v || 0) * 100).toFixed(1) + '%';
+    const set = (id, txt, cls) => {
+      const el = $(id);
+      if (!el) return;
+      el.textContent = txt;
+      el.className = 'v' + (cls ? ' ' + cls : '');
+    };
+
+    const enabled = !!p.enabled;
+    const halted = !!p.halted;
+    let statusCls = enabled ? '' : 'muted';
+    let statusTxt = enabled ? 'ENABLED' : 'DISABLED (PERPS_ENABLED not set)';
+    if (halted) { statusCls = 'neg'; statusTxt = 'HALTED — ' + (p.haltReason || 'loss ceiling'); }
+
+    const banner = $('perpsBanner');
+    if (banner) {
+      banner.textContent = halted
+        ? '⛔ Sleeve halted: ' + (p.haltReason || '') + '. No new margin deployed; the spot book is unaffected.'
+        : 'Funded ONLY by equity above the untouchable principal floor — base spot capital is never at risk. ' +
+          'Budget goes to $0 the moment equity is at/below the floor.';
+      banner.className = halted ? 'neg' : 'muted';
+    }
+
+    set('pStatus', statusTxt, statusCls);
+    set('pMark', p.markHealthy ? '$' + fmt(p.markPrice, 2) : 'n/a' + (p.feedRejectReason ? ' (' + p.feedRejectReason + ')' : ''), p.markHealthy ? '' : 'muted');
+    set('pHwm', money(p.principalFloorUsd));
+    set('pElig', money(p.eligibleProfitUsd));
+    set('pBudget', money(p.sleeveBudgetUsd), p.sleeveBudgetUsd > 0 ? 'pos' : 'muted');
+    set('pEdge', pctv(p.edgePct));
+
+    // Dynamic profit signal: derived live from our own archive/journal, no
+    // hardcoded floor. This is the real "how much can we actually use" answer.
+    const pr = p.profit || {};
+    set('pBaseline', pr.baselineEquityUsd > 0 ? money(pr.baselineEquityUsd) + ' (' + (pr.baselineSource || 'none') + ')' : 'anchoring…', pr.baselineEquityUsd > 0 ? '' : 'muted');
+    set('pNewProfit', money(pr.newProfitUsd), pr.newProfitUsd > 0 ? 'pos' : 'muted');
+    set('pFreeCash', money(pr.freeCashUsd), pr.freeCashUsd >= 10 ? 'pos' : 'muted');
+    set('pLifeReal', money(pr.lifetimeRealizedUsd), pr.lifetimeRealizedUsd >= 0 ? 'pos' : 'neg');
+    set('pWindowReal', money(pr.windowRealizedUsd), pr.windowRealizedUsd >= 0 ? 'pos' : 'neg');
+    set('pFills', (pr.sampleFills || 0) + (pr.ready ? ' (ready)' : ' (need more)'), pr.ready ? 'pos' : 'muted');
+    set('pGridLong', money(p.gridNetLongUsd));
+    set('pExposure', pctv(p.exposurePct), p.exposurePct >= 0.15 ? 'warn' : '');
+    set('pPnl', money(p.realizedPnlUsd), p.realizedPnlUsd >= 0 ? 'pos' : 'neg');
+    set('pFees', money(p.feesPaidUsd), 'muted');
+
+    const o = p.open;
+    if (o) {
+      set('pPosition', o.side.toUpperCase() + ' ' + o.leverage + 'x · $' + fmt(o.collateralUsd, 2) + ' margin · $' + fmt(o.notionalUsd, 2) + ' notional');
+      const bufCls = p.liquidationBufferPct > 0.15 ? 'pos' : (p.liquidationBufferPct > 0 ? 'warn' : 'neg');
+      set('pLiq', pctv(p.liquidationBufferPct) + ' to liq @ $' + fmt(o.liquidationPriceUsd, 2), bufCls);
+    } else {
+      set('pPosition', p.hedgeActive ? 'hedge active' : 'flat', 'muted');
+      set('pLiq', '—', 'muted');
+    }
+
+    const dec = $('pDecision');
+    if (dec) {
+      dec.textContent = p.lastDecision || '—';
+      dec.className = 'v' + (/reject|halt|disabled/.test(p.lastDecision || '') ? ' muted' : '');
+    }
+
+    renderPerpsLedger();
+  }
+
+  async function renderPerpsLedger() {
+    try {
+      const res = await fetch('/api/perps/ledger');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const j = await res.json();
+      const rows = (j.history || []).slice().reverse();
+      const tb = $('perpsLedgerTable').querySelector('tbody');
+      const money = (v) => (v == null ? '—' : (v < 0 ? '-$' : '$') + fmt(Math.abs(v), 2));
+      tb.innerHTML = rows.map((r) => {
+        const t = new Date(r.ts).toLocaleTimeString('en-US');
+        const cls = r.kind === 'halt' || r.kind === 'reject' ? 'neg' : (r.pnlUsd > 0 ? 'pos' : '');
+        return `<tr class="${cls}"><td>${t}</td><td>${r.kind}</td><td>${r.side || '—'}</td><td>${money(r.collateralUsd)}</td><td>${money(r.notionalUsd)}</td><td>${money(r.pnlUsd)}</td><td>${r.price ? '$' + fmt(r.price, 2) : '—'}</td><td class="muted">${r.note || ''}</td></tr>`;
+      }).join('') || '<tr><td colspan="8" class="muted">No perps activity yet.</td></tr>';
+    } catch (e) {
+      console.warn('[dash] perps ledger load failed: ' + (e && e.message));
+    }
   }
 
   function renderHistory() {

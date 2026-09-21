@@ -36,14 +36,19 @@ import {
 import { join } from 'node:path';
 import type { Trade } from './types.js';
 
-const STATE_DIR = join(process.cwd(), '.botstate');
+// Honor an explicit override (tests, alternate deployments) before the default.
+// Resolved lazily so an env override (tests, alternate deployments) takes
+// effect even when a test sets it after the import statement (ESM hoisting).
+function stateDir(): string {
+  return process.env.BOT_STATE_DIR || join(process.cwd(), '.botstate');
+}
 
 export function journalPath(mode: 'paper' | 'live'): string {
-  return join(STATE_DIR, `trades-${mode}.jsonl`);
+  return join(stateDir(), `trades-${mode}.jsonl`);
 }
 
 export function equityArchivePath(mode: 'paper' | 'live'): string {
-  return join(STATE_DIR, `equity-${mode}.jsonl`);
+  return join(stateDir(), `equity-${mode}.jsonl`);
 }
 
 export interface EquitySample {
@@ -52,7 +57,7 @@ export interface EquitySample {
 }
 
 function ensureDir(): void {
-  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(stateDir(), { recursive: true, mode: 0o700 });
 }
 
 /** Append fills to the forever journal. Best-effort; never throws. */

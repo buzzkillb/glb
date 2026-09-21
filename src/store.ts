@@ -32,6 +32,48 @@ const STATE_DIR = join(process.cwd(), '.botstate');
 const EQUITY_ARCHIVE_MS = 15 * 60_000;
 
 /** Downsample a time series to at most `max` points, keeping the last point. */
+/**
+ * Neutral perps-sleeve view. Always present so the dashboard/API has a stable
+ * shape even before the sleeve has run or when it is disabled.
+ */
+function emptyPerpsState(): import('./types.js').PerpsState {
+  return {
+    enabled: false,
+    halted: false,
+    haltReason: '',
+    markPrice: 0,
+    markHealthy: false,
+    feedRejectReason: '',
+    principalFloorUsd: 0,
+    peakEquityUsd: 0,
+    outstandingMarginUsd: 0,
+    eligibleProfitUsd: 0,
+    profit: {
+      baselineEquityUsd: 0,
+      baselineSource: 'none',
+      newProfitUsd: 0,
+      freeCashUsd: 0,
+      lifetimeRealizedUsd: 0,
+      windowRealizedUsd: 0,
+      sampleFills: 0,
+      ready: false,
+      note: 'not computed yet',
+    },
+    sleeveBudgetUsd: 0,
+    edgePct: 0,
+    gridNetLongUsd: 0,
+    exposurePct: 0,
+    hedgeActive: false,
+    hedgeCoveragePct: 0,
+    realizedPnlUsd: 0,
+    feesPaidUsd: 0,
+    open: null,
+    liquidationBufferPct: 0,
+    lastDecision: 'not started',
+    note: '',
+  };
+}
+
 function decimate<T>(arr: T[], max: number): T[] {
   if (arr.length <= max) return arr;
   const step = arr.length / max;
@@ -74,6 +116,17 @@ export class StateStore extends EventEmitter {
   /** Last cost-basis reconciliation result (for the accountability audit UI). */
   private lastCostBasis?: CostBasisResult;
 
+  /**
+   * PERPS SLEEVE hook: when set (by the engine), the snapshot includes the
+   * sleeve's live view. Kept as an injected provider so the store never depends
+   * on the perps module — the human trader/dashboard can always see sleeve
+   * state, and the sleeve's own ledger stays isolated.
+   */
+  perpsProvider?: () => import('./types.js').PerpsState;
+
+  /** Perps ledger tape reader (open/close/halt/reject) for the dashboard. */
+  perpsLedgerProvider?: () => unknown;
+
   constructor(private cfg: AppConfig) {
     super();
     this.account = {
@@ -96,6 +149,7 @@ export class StateStore extends EventEmitter {
         lastBuyAt: undefined,
       },
       memes: {},
+      perps: emptyPerpsState(),
     };
     // Seed ring-fenced meme slots so the dashboard/API always has a home for them.
     for (const m of cfg.strategies.memes) {
@@ -306,6 +360,7 @@ export class StateStore extends EventEmitter {
         grid: cfg.strategies.grid,
         dca: cfg.strategies.dca,
         memes: cfg.strategies.memes,
+        perps: cfg.strategies.perps,
       },
       market,
       risk: {
@@ -326,6 +381,14 @@ export class StateStore extends EventEmitter {
       // dashboard shows the whole week without a megabyte per update.
       equityHistory: decimate(this.equityHistory, 600),
     };
+    // PERPS SLEEVE view (measurement-only, isolated ledger) when wired.
+    if (this.perpsProvider) {
+      try {
+        s.strategies.perps = this.perpsProvider();
+      } catch (e) {
+        console.warn(`[perps] snapshot view failed: ${(e as Error).message}`);
+      }
+    }
     // Sample one equity point per poll for the dashboard curve.
     this.sampleEquity();
     this.emit('snapshot', s);
