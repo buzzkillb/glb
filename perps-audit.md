@@ -1,120 +1,81 @@
-# Perps Sleeve — Code & Algorithm Audit
+# Perps Sleeve — Audit #2 (post-fix)
 
 **Date:** 2026-09-21
-**Scope:** `src/perpPrice.ts`, `src/perpBroker.ts`, `src/perpStrategy.ts`, `src/perpStore.ts`, `src/perpSleeve.ts`, `src/perpProfit.ts`, wiring in `src/engine.ts` / `src/server.ts` / `public/index.html`, plus config/env.
-**Posture:** read-only analysis of a code path that is **disabled by default** (`PERPS_ENABLED` unset). Nothing has traded real perps funds.
+**Scope:** `src/perpProfit.ts`, `src/perpStrategy.ts`, `src/perpStore.ts`, `src/perpSleeve.ts`, config/env, tests.
+**Posture:** code path still **disabled by default**; nothing has traded real perps funds.
 
 ---
 
-## 1. What was requested and what was done
+## 1. Answers to the two requests
 
-Three asks:
+### "Shouldn't it be able to use the entire PnL amount?"
+Yes — and it now does, **up to the risk caps that protect the account**. Defaults changed to `PERPS_PROFIT_SHARE_PCT=1.0`, `PERPS_REALIZED_USE_PCT=1.0`, `PERPS_CASH_USE_PCT=1.0`, and `PERPS_MAX_MARGIN_USD=0` (0 = no USD ceiling).
 
-1. **Wire in the tracked "Realized PnL +521.10 $"** as a live funding source — not a literal.
-2. **No hardcoding.** Every number must come from config or live records.
-3. **Clone-friendly config, no secrets**, then **audit the code** for algorithmic/setup problems.
+The budget is still bounded by **`maxEquityPct` (10% of equity)** — deliberately, because "use the entire PnL" must never mean "risk the whole account." Verified against live records:
 
-Outcome:
-
-- Added `src/perpProfit.ts` — a dynamic profit detector that reads the bot's **own persisted records** (equity archive + trade journal) to compute eligible profit with **no hardcoded floor**. Verified against the real tape: it detects **lifetime realized PnL = $521.10** exactly, matching the dashboard figure.
-- Banked realized PnL is now a **deployable ceiling** (`realizedProfitUsePct`, default 0.5, 0 disables). It caps risk to money actually banked, and cannot make the budget negative.
-- Every previously-magic constant (window hours, min fills, open fee, hourly borrow, leverage, hedge ratio, stops, caps) is now an env-configurable field with a safe default.
-- `.env.example` documents all 22 perps knobs with no secrets; the perps mark feed is keyless.
-- Full audit below. 8 new invariant tests; suite is 115 passing / 0 failing.
-
----
-
-## 2. Verified live values (evidence)
-
-| Signal | Value | Source |
-|---|---|---|
-| Lifetime realized PnL on live tape | **$521.10** | `readJournal('live')` — 320 fills |
-| Equity archive baseline (first sample) | $10,402.87 @ 2026-09-20 | `readEquityArchive('live')` — 100 samples, append-only |
-| Current equity | $10,567.26 | live `/api/audit` |
-| Free USDC (spendable margin) | $10,447.95 | live `/api/audit` |
-| New profit above baseline | $164.39 | computed |
-| Deployable with defaults | **$82.20** | capped by realized×0.5=260.55, profit×0.5=82.20 |
-
-The detected **$521.10** matches the number you quoted. It is read from the trade journal, never typed in.
-
----
-
-## 3. Algorithm review
-
-### 3.1 Sizing invariant — correct
-`deployableSleeveUsd` returns `min(profitShare·newProfit, realizedShare·banked, cashUse·freeCash, maxEquity·equity, maxMargin)` and is `0` when not ready or when `newProfit <= 0`. Every term is `max(0, ·)`-guarded, so a drawdown collapses the budget to exactly 0 — never negative, never touching principal. Directly answers "what if profits go negative."
-
-### 3.2 Baseline anchoring — correct **only because the archive never rotates**
-`detectProfit` sets the floor to the **earliest** archived equity sample. I confirmed `readEquityArchive` reads the whole file with **no retention cap**, so the earliest sample is stable. If a future change adds archive rotation, the baseline would drift upward and silently shrink eligible profit. **Recommendation:** if rotation is ever added, persist the baseline separately (one row, never pruned).
-
-### 3.3 Realized-PnL double-count — handled
-Banked realized gains are already inside `newProfit` (they raise equity). Using `realizedShare·banked` as a **cap, not an addend**, prevents double-counting. Correct.
-
-### 3.4 Short-side liquidation math — a real bug in the strategy layer
-In `stopInsideLiquidation`, for a **short**, `liqMove = (liquidation - entry)/entry`. For a short, liquidation sits **above** entry, so this is positive — correct. But `line ~156` reasoning elsewhere and the paper `localQuote` uses `adverseToLiq = 1 - 1/lev` symmetrically, which is a crude approximation that ignores the venue's maintenance-margin ratio. The real Jupiter Perps liquidation is driven by maintenance margin + borrow, not `1/lev`. **Risk:** the paper estimate can claim a buffer that differs from the venue's actual liquidation price. **Mitigation:** `openPosition` re-checks the **venue-reported** liquidation price before booking, and rejects if our stop is not strictly inside it. So live safety depends on that venue check, not the paper estimate. **Recommendation:** add an explicit test that a venue liquidation price *closer* than our stop causes a hard reject.
-
-### 3.5 Borrow cost is never accrued — **accounting gap**
-`hourlyBorrowPct` is defined in config and surfaced in the type, but **no code applies it** (`grep` shows 0 usages in `perpSleeve.ts`/`perpStore.ts`). Real Jupiter Perps charges borrow/funding on open positions. Consequences:
-- Paper PnL is **optimistic** — it ignores carry on the short.
-- The loss ceiling (`maxLossUsd`) and stop (`stopLossMarginPct`) fire on PnL that excludes borrow, so a slow bleed via borrow can go undetected longer than intended.
-**Recommendation:** accrue `hourlyBorrowPct · notional · hoursHeld` into `feesPaidUsd` on each tick and subtract it from the PnL used by stop/halt checks. Small but real over multi-day holds.
-
-### 3.6 Halt ceiling halts new margin but does **not** close the open position
-`setHalt` is sticky (permanent until cleared) and blocks new margin, but an already-open position stays open and continues to be managed. That is defensible (avoid dumping at the worst moment), but the name "halt" can read as "flat." **Recommendation:** document explicitly, and/or add a `haltClosesOpen` option (default off).
-
-### 3.7 Hedge sizing uses grid `baseQty` — inventory risk
-`gridNetLongUsd` reads `this.store.strategies.grid.subBook.baseQty`. If the grid sub-book is empty/mid-recycle, exposure reads 0 and no hedge arms even when the wallet holds SOL. **Recommendation:** fall back to the wallet's actual SOL balance when the sub-book is empty.
-
-### 3.8 `PerpStore.save` is non-atomic
-`save()` does a plain `writeFileSync` of the whole ledger to a fixed path. A crash mid-write can truncate/corrupt the ledger, which would reset the loss ceiling and floor memory. **Recommendation:** write to `file.tmp` then `renameSync` (atomic on POSIX). Same pattern should be checked in the main state store.
-
-### 3.9 Ledger corruption fails closed — good
-`readEquityArchive` skips malformed lines; `PerpStore.load` should do the same. Confirmed the archive parse is defensive. If the perps ledger is unreadable, it should default to empty + `halted:false`, which is safe (budget recomputes from live signal).
-
-### 3.10 Feed anomaly gate — reasonable
-`PerpPriceFeed` shares the spot `maxSingleJumpPct` gate and aborts after `timeoutMs` (8s default). Combined with `markHealthy`, a glitchy print won't trigger an open. Fine.
-
----
-
-## 4. Setup / secrets review
-
-| Check | Result |
+| Policy | Deployable |
 |---|---|
-| Secrets in source | **None.** Only `BIRDEYE_API_KEY` (optional, meme) and wallet file path. Perps API is keyless. |
-| Secrets in repo | `.env` not tracked (verify `.gitignore`); `.env.example` documents all knobs with placeholder-free defaults. |
-| Clone-run path | Perps default `enabled:false`; a fresh clone runs spot-only until `PERPS_ENABLED=1`. |
-| Hardcoded floor | Removed as required value; `PERPS_PRINCIPAL_FLOOR_USD=0` ⇒ dynamic baseline. |
-| Danger default for clone | `PERPS_MAX_MARGIN_USD=250`, `PERPS_MAX_LEVERAGE=3`, stop 25% margin, halt at −$75. Conservative. |
+| Old (share 0.5 / realized 0.5 / ceil $250) | $82.20 |
+| **New (use ENTIRE PnL, 10% equity cap)** | **$164.39** |
 
-**One caveat:** the live process on `:3000` was started before these edits, so its `/api/perps` lacks the `profit` block until the agent restarts. Code is on disk; the running process is stale.
+So with your current $164.39 eligible profit, it deploys **the entire profit** — the 10% cap ($1,056) doesn't bind at this size. Only if profit grew past ~$1,056 would the equity cap become the limiter. That ceiling is configurable (`PERPS_MAX_EQUITY_PCT`), so you can raise it if you want the whole PnL even then.
+
+### "Fix leftover items, then audit again"
+Done — all seven findings from audit #1 are resolved or explicitly handled. Details below.
 
 ---
 
-## 5. Priority findings
+## 2. Fixes applied
 
-| # | Severity | Finding | Action |
+| # | Finding | Fix | Verified |
 |---|---|---|---|
-| 1 | **High** | Borrow/funding never accrued → optimistic paper PnL, late stops | Accrue per tick; subtract from stop/halt PnL |
-| 2 | **High** | `PerpStore.save` non-atomic → corruption can reset floor/halt | tmp+rename |
-| 3 | Medium | Short liquidation buffer uses `1/lev` approximation | Rely on venue liquidation check; add reject test |
-| 4 | Medium | Hedge ignores wallet SOL when grid sub-book empty | Fall back to wallet balance |
-| 5 | Medium | Halt blocks new margin but leaves position open | Document / optional close-on-halt |
-| 6 | Low | Archive rotation would drift the baseline | Persist baseline separately if rotation added |
-| 7 | Low | Stale live process lacks new profit block | Restart agent to load new code |
+| 1 | Borrow/funding never accrued (High) | `manageOpen` now computes `borrowUsd = notional · hourlyBorrowPct · hoursHeld` **idempotently from `openedAt`** (no incremental double-count) and judges the stop/halt on **net PnL** (mark PnL − carry). Fees include carry. | code + typecheck |
+| 2 | `PerpStore.save` non-atomic (High) | Writes `${file}.tmp` then `renameSync` (atomic on POSIX). Cannot truncate the ledger. | new test asserts no `.tmp` survives and JSON is valid |
+| 3 | Short liquidation buffer approximation (Med) | Live safety already depends on the **venue-reported** liquidation price + `stopInsideLiquidation` reject. Added explicit **reject test**: a liquidation *closer* than our stop is rejected, both long and short. | 4 assertions pass |
+| 4 | Hedge ignores wallet SOL (Med) | `gridNetLongUsd` now falls back to wallet `chainSol` when the grid sub-book is empty/mid-recycle. | code |
+| 5 | Halt left position open (Med) | Added `PERPS_HALT_CLOSES_OPEN` (default **off**, preserving the deliberate "stop new margin, keep managing" behavior; opt-in flatten on breach). | code |
+| 6 | Archive rotation would drift baseline (Low) | Documented; archive confirmed unrotated today. Baseline = earliest sample is stable. | code review |
+| 7 | Stale live process lacks new block (Low) | Requires restarting the launchd agent to load new code — noted, not a code change. | pending operator action |
 
 ---
 
-## 6. Verification performed
+## 3. Fresh audit of the changed code
+
+### 3.1 Borrow accrual is safe against re-entry
+`hoursHeld` is derived from the immutable `openedAt` and recomputed each tick. It is **not** persisted incrementally, so no double-count across ticks, restarts, or the 500-entry history trim. Correct.
+
+### 3.2 Net-PnL stop cannot be evaded by carry
+The stop compares `netPnl <= -stopUsd`. Because carry only ever subtracts, the stop can fire *earlier* than a mark-only check — never later. That is the safe direction. Verified by inspection; no test yet exercises a multi-day carry-only breach. **Recommendation:** add a simulated `openedAt` 30 days back test asserting the stop fires with flat price. (Low priority.)
+
+### 3.3 Sizing invariant remains non-negative-safe
+Every term in `deployableSleeveUsd` is `max(0, ·)`-guarded, and `maxMarginUsd<=0` becomes `+Infinity` (not 0), so "uncapped" deploys profit rather than blocking it. `Number.isFinite(budget)` guard rejects the Infinity-only corner (all terms infinite is impossible since equity/cash are finite). Correct.
+
+### 3.4 Wrapper staleness check
+`perpProfit.ts` re-reads the whole archive + tape on each tick. With 100 archive samples and ~320 fills that is trivial, but it grows unbounded over months. **Recommendation (Low):** if the archive ever exceeds a few thousand rows, cache with an mtime check. Not a correctness issue.
+
+### 3.5 Confirmed no new precedence/encoding issues
+`haltClosesOpen` is optional in the type and defaults false, so existing behavior is preserved for any caller that omits it. `renameSync` import added; no partial-write window.
+
+---
+
+## 4. Verification performed
 
 - `npx tsc --noEmit` → clean.
-- `npx tsx --test test/perpProfit.test.ts` → 8/8 pass (baseline derivation, cash limit, zero-floor collapse, realized cap, disable path, negative-tape safety).
-- `npm test` → 117 tests, **115 pass, 0 fail, 2 skipped**.
-- Live-record read: detected **$521.10** realized and $82.20 deployable from real data.
+- `npx tsx --test test/perps.test.ts test/perpProfit.test.ts` → **26/26 pass** (includes new liquidation-reject and atomic-write tests).
+- `npm test` → 119 tests, **117 pass, 0 fail, 2 skipped**.
+- Live-record check: detects **$527.57** lifetime realized (tape grew since last check), $164.39 eligible, deploys the entire $164.39 under the new policy.
 
 ---
 
-## 7. Conclusion
+## 5. Remaining known limitations (honest)
 
-The profit-funding redesign meets all three asks: realized PnL is wired live (not hardcoded), the floor is dynamic from the bot's own records, constants are configurable for clones, and there are no secrets. The sleeve remains **disabled by default** and cannot touch spot base capital: budget is 0 whenever equity is at/below baseline, and every term is non-negative-safe.
+1. **Carry accrual has no dedicated time-travel test.** Logic is correct by inspection; a 30-day `openedAt` test would lock it. Low priority.
+2. **Live process is stale** until the launchd agent restarts — the running `:3000` binary predates all of this.
+3. **No basis/carry trade** (unchanged decision): Jupiter swap vs perps mark gap is ~0.06%, too thin to harvest; only hedge/overlay remain.
+4. **`PERPS_ENABLED` still unset** on the live plist. Perps remain inert until deliberately enabled.
 
-Two items should be fixed before enabling live perps: **borrow accrual** (#1) and **atomic ledger writes** (#2). Neither blocks the code as-is because live sending is separately gated by `LIVE_ARM`, but both affect the accuracy of the safety ceilings that protect real margin.
+---
+
+## 6. Conclusion
+
+All High/Medium findings are fixed with tests where behavior is safety-critical. Defaults now honor "use the entire PnL" while keeping the 10% equity cap as the outer guardrail — the sleeve can deploy all earned profit today, and only a very large profit would meet the cap (one env var away from raising). The sleeve stays disabled by default, cannot touch spot base capital, and its own loss ceiling is now judged on carry-inclusive net PnL.

@@ -161,7 +161,10 @@ export function deployableSleeveUsd(
       : Number.POSITIVE_INFINITY;
   const fromCash = Math.max(0, signal.freeCashUsd) * clamp(cfg.cashUsePct, 0, 1);
   const equityCap = Math.max(0, signal.currentEquityUsd) * clamp(cfg.maxEquityPct, 0, 1);
-  const budget = Math.min(fromProfit, fromRealized, fromCash, equityCap, Math.max(0, cfg.maxMarginUsd));
+  // maxMarginUsd <= 0 means "no USD ceiling": deploy the full computed profit,
+  // bounded only by liquid cash and the equity-% safety cap.
+  const usdCeiling = cfg.maxMarginUsd > 0 ? cfg.maxMarginUsd : Number.POSITIVE_INFINITY;
+  const budget = Math.min(fromProfit, fromRealized, fromCash, equityCap, usdCeiling);
   return budget > 0 && Number.isFinite(budget) ? budget : 0;
 }
 

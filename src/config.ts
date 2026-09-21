@@ -176,11 +176,13 @@ export interface StrategyConfig {
  *  block (e.g. minimal test fixtures). Disabled, so it is inert by default. */
 export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   enabled: false,
-  profitSharePct: 0.5,
-  cashUsePct: 0.5,
+  // "Use the entire PnL": default to 1.0 so ALL eligible profit is deployable,
+  // leaving only the risk caps below (equity %) as the true ceiling.
+  profitSharePct: 1.0,
+  cashUsePct: 1.0,
   // Fraction of the sleeve's OWN banked realized PnL (read live from the trade
   // tape) that is deployable. 0 disables the realized-PnL funding path.
-  realizedProfitUsePct: 0.5,
+  realizedProfitUsePct: 1.0,
   // Trailing window (hours) for the windowed-realized profit signal.
   profitWindowHours: 168,
   // Minimum real fills before the tape is trusted enough to size from.
@@ -188,8 +190,16 @@ export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   // Venue cost model for the paper/live estimate (open/close fee, hourly borrow).
   openFeePct: 0.0006,
   hourlyBorrowPct: 0.000006,
+  // Hard safety cap: sleeve margin may never exceed this fraction of equity.
+  // This is the last-resort ceiling that keeps the sleeve from over-deploying
+  // even when profit is large. 10% is conservative; raise deliberately.
   maxEquityPct: 0.1,
-  maxMarginUsd: 250,
+  // Absolute USD ceiling. 0 (default) = NO USD ceiling: deploy the full computed
+  // profit, bounded only by the equity-% cap above and liquid cash.
+  maxMarginUsd: 0,
+  // When the loss ceiling trips, also flatten any open position (default off:
+  // halt blocks new margin only, leaving the live position managed).
+  haltClosesOpen: false,
   maxLeverage: 3,
   hedgeRatio: 0.8,
   hedgeTriggerPct: 0.15,
@@ -223,10 +233,15 @@ export interface PerpSleeveConfig {
   openFeePct: number;
   /** Venue hourly borrow rate as a fraction of notional (cost model). */
   hourlyBorrowPct: number;
-  /** Absolute cap on sleeve margin as a fraction of equity. */
+  /** Absolute cap on sleeve margin as a fraction of equity (final safety ceiling). */
   maxEquityPct: number;
-  /** Hard USD ceiling on margin regardless of equity. */
+  /** Hard USD ceiling on margin. 0 = uncapped (deploy full computed profit). */
   maxMarginUsd: number;
+  /**
+   * When the loss ceiling trips, also flatten any open position. Default false:
+   * "halt" blocks NEW margin only and keeps managing the live position.
+   */
+  haltClosesOpen: boolean;
   /** Leverage ceiling (2-3 recommended). */
   maxLeverage: number;
   /** Hedge: fraction of grid net-long delta to neutralize (0..1). */
@@ -367,17 +382,18 @@ export function loadConfig(): AppConfig {
       // grid/DCA book (base capital) is never at risk.
       perps: {
         enabled: envBool('PERPS_ENABLED', false),
-        profitSharePct: envNumber('PERPS_PROFIT_SHARE_PCT', 0.5, 0, 1),
+        profitSharePct: envNumber('PERPS_PROFIT_SHARE_PCT', 1.0, 0, 1),
         // Only liquid USDC can be posted as margin; SOL is inventory.
-        cashUsePct: envNumber('PERPS_CASH_USE_PCT', 0.5, 0, 1),
+        cashUsePct: envNumber('PERPS_CASH_USE_PCT', 1.0, 0, 1),
         // Fraction of banked realized PnL the sleeve may risk.
-        realizedProfitUsePct: envNumber('PERPS_REALIZED_USE_PCT', 0.5, 0, 1),
+        realizedProfitUsePct: envNumber('PERPS_REALIZED_USE_PCT', 1.0, 0, 1),
         profitWindowHours: envNumber('PERPS_PROFIT_WINDOW_HOURS', 168, 1, 8760),
         minFillsForConfidence: envNumber('PERPS_MIN_FILLS', 8, 0, 1e6),
         openFeePct: envNumber('PERPS_OPEN_FEE_PCT', 0.0006, 0, 0.1),
         hourlyBorrowPct: envNumber('PERPS_HOURLY_BORROW_PCT', 0.000006, 0, 0.01),
         maxEquityPct: envNumber('PERPS_MAX_EQUITY_PCT', 0.1, 0, 1),
-        maxMarginUsd: envNumber('PERPS_MAX_MARGIN_USD', 250, 0, 1e9),
+        maxMarginUsd: envNumber('PERPS_MAX_MARGIN_USD', 0, 0, 1e9),
+        haltClosesOpen: envBool('PERPS_HALT_CLOSES_OPEN', false),
         maxLeverage: envNumber('PERPS_MAX_LEVERAGE', 3, 1, 10),
         hedgeRatio: envNumber('PERPS_HEDGE_RATIO', 0.8, 0, 1),
         hedgeTriggerPct: envNumber('PERPS_HEDGE_TRIGGER_PCT', 0.15, 0, 1),

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 /**
@@ -118,7 +118,12 @@ export class PerpStore {
   save(): void {
     try {
       mkdirSync(stateDir(), { recursive: true, mode: 0o700 });
-      writeFileSync(this.file, JSON.stringify(this.ledger), { encoding: 'utf8', mode: 0o600 });
+      // ATOMIC: write a sibling temp file then rename over the target. rename is
+      // atomic on POSIX, so a crash mid-write can never truncate/corrupt the
+      // ledger (which would reset the floor and the loss-ceiling memory).
+      const tmp = `${this.file}.tmp`;
+      writeFileSync(tmp, JSON.stringify(this.ledger), { encoding: 'utf8', mode: 0o600 });
+      renameSync(tmp, this.file);
     } catch (e) {
       console.warn(`[perps] ledger write failed: ${(e as Error).message}`);
     }

@@ -36,8 +36,10 @@ export interface PerpSleeveConfig {
   hourlyBorrowPct: number;
   /** Absolute cap on sleeve margin as a fraction of equity (e.g. 0.10). */
   maxEquityPct: number;
-  /** Hard USD ceiling on margin regardless of equity. */
+  /** Hard USD ceiling on margin. 0 = uncapped (deploy full computed profit). */
   maxMarginUsd: number;
+  /** When the loss ceiling trips, also flatten any open position (default off). */
+  haltClosesOpen?: boolean;
   /** Leverage ceiling (2-3 recommended). */
   maxLeverage: number;
   /** Hedge: fraction of grid net-long delta to neutralize (0..1). */

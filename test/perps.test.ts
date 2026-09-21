@@ -201,6 +201,32 @@ test('perps ledger is stored in its own file, separate from the spot book', () =
   assert.match(file, /perps-live\.json$/);
 });
 
+test('a venue liquidation price CLOSER than our stop forces a hard reject', () => {
+  // Long with leverage 3: liquidation at -33% would be far; force it closer.
+  // Our stop is 25% of MARGIN = 25/3 = 8.33% adverse price move.
+  // A liquidation only 5% away must be rejected (venue would fire first).
+  const stopPct = 0.25;
+  const lev = 3;
+  // entry 100, liquidation 95 (5% away) -> stop needs < 5%, it is 8.33% -> reject.
+  assert.equal(stopInsideLiquidation('long', 100, 95, stopPct, lev), false);
+  // Healthy venue liquidation 33% away -> accept.
+  assert.equal(stopInsideLiquidation('long', 100, 67, stopPct, lev), true);
+  // Short side, mirrored.
+  assert.equal(stopInsideLiquidation('short', 100, 105, stopPct, lev), false);
+  assert.equal(stopInsideLiquidation('short', 100, 133, stopPct, lev), true);
+});
+
+test('perps ledger writes atomically (no .tmp left behind, valid JSON)', () => {
+  const s = freshStore('live');
+  s.seedFloor(9_999, 0);
+  const file = path.join(process.env.PERP_STATE_DIR!, 'perps-live.json');
+  // No temp artifact may survive a successful save.
+  assert.equal(existsSync(`${file}.tmp`), false);
+  const parsed = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(parsed.version, 1);
+  assert.equal(parsed.principalFloorUsd, 9_999);
+});
+
 test('mark feed commits only prints that pass the anomaly gate', async () => {
   const feed = new PerpPriceFeed({ apiUrl: 'https://perps-api.jup.ag/v1', maxSingleJumpPct: 0.15 });
   // First print always accepted (no prior).
