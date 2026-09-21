@@ -1,81 +1,99 @@
-# Perps Sleeve — Audit #2 (post-fix)
+# Perps Sleeve — Audit #3 (restart + full re-audit)
 
 **Date:** 2026-09-21
-**Scope:** `src/perpProfit.ts`, `src/perpStrategy.ts`, `src/perpStore.ts`, `src/perpSleeve.ts`, config/env, tests.
-**Posture:** code path still **disabled by default**; nothing has traded real perps funds.
+**Scope:** whole perps path + `engine.ts` wiring + `store.ts` persistence, after restarting the live bot.
+**Live process:** PID 4543+ on `:3000`, launchd `com.buzzkillb.gridlord`, `LIVE_ARM=1`.
+**Posture:** sleeve **disabled** (`PERPS_ENABLED` unset). Nothing has traded real perps funds.
 
 ---
 
-## 1. Answers to the two requests
+## 1. Restart
 
-### "Shouldn't it be able to use the entire PnL amount?"
-Yes — and it now does, **up to the risk caps that protect the account**. Defaults changed to `PERPS_PROFIT_SHARE_PCT=1.0`, `PERPS_REALIZED_USE_PCT=1.0`, `PERPS_CASH_USE_PCT=1.0`, and `PERPS_MAX_MARGIN_USD=0` (0 = no USD ceiling).
+The bot was restarted via `launchctl kickstart -k gui/<uid>/com.buzzkillb.gridlord`. New process came up on `:3000`, live mode, chain sync completed, and the spot grid resumed normally. The previously-stale `/api/perps` (no `profit` block) now serves the full live signal.
 
-The budget is still bounded by **`maxEquityPct` (10% of equity)** — deliberately, because "use the entire PnL" must never mean "risk the whole account." Verified against live records:
+## 2. Live verification (as of this audit)
 
-| Policy | Deployable |
+| Field | Value |
 |---|---|
-| Old (share 0.5 / realized 0.5 / ceil $250) | $82.20 |
-| **New (use ENTIRE PnL, 10% equity cap)** | **$164.39** |
+| Mark (SOL perps) | $118.61, `markHealthy: true` |
+| Equity | $10,557 |
+| Profit baseline (dynamic, archive) | $10,402.87 |
+| Eligible / new profit | $154.51 |
+| Sleeve budget | $154.51 |
+| Free cash (USDC) | $9,129.45 |
+| Lifetime realized (tape) | $527.57 |
+| Window realized (7d) | $458.03 |
+| Tape fills | 315 — `ready: true` |
+| Grid net-long | $1,428.02 (exposure 13.5%) |
+| Position | flat |
+| Status | DISABLED (`PERPS_ENABLED` not set) |
 
-So with your current $164.39 eligible profit, it deploys **the entire profit** — the 10% cap ($1,056) doesn't bind at this size. Only if profit grew past ~$1,056 would the equity cap become the limiter. That ceiling is configurable (`PERPS_MAX_EQUITY_PCT`), so you can raise it if you want the whole PnL even then.
-
-### "Fix leftover items, then audit again"
-Done — all seven findings from audit #1 are resolved or explicitly handled. Details below.
-
----
-
-## 2. Fixes applied
-
-| # | Finding | Fix | Verified |
-|---|---|---|---|
-| 1 | Borrow/funding never accrued (High) | `manageOpen` now computes `borrowUsd = notional · hourlyBorrowPct · hoursHeld` **idempotently from `openedAt`** (no incremental double-count) and judges the stop/halt on **net PnL** (mark PnL − carry). Fees include carry. | code + typecheck |
-| 2 | `PerpStore.save` non-atomic (High) | Writes `${file}.tmp` then `renameSync` (atomic on POSIX). Cannot truncate the ledger. | new test asserts no `.tmp` survives and JSON is valid |
-| 3 | Short liquidation buffer approximation (Med) | Live safety already depends on the **venue-reported** liquidation price + `stopInsideLiquidation` reject. Added explicit **reject test**: a liquidation *closer* than our stop is rejected, both long and short. | 4 assertions pass |
-| 4 | Hedge ignores wallet SOL (Med) | `gridNetLongUsd` now falls back to wallet `chainSol` when the grid sub-book is empty/mid-recycle. | code |
-| 5 | Halt left position open (Med) | Added `PERPS_HALT_CLOSES_OPEN` (default **off**, preserving the deliberate "stop new margin, keep managing" behavior; opt-in flatten on breach). | code |
-| 6 | Archive rotation would drift baseline (Low) | Documented; archive confirmed unrotated today. Baseline = earliest sample is stable. | code review |
-| 7 | Stale live process lacks new block (Low) | Requires restarting the launchd agent to load new code — noted, not a code change. | pending operator action |
+The dashboard Perps tab renders all of these correctly (verified in-browser). The sleeve computes a live, non-zero budget while remaining inert until enabled.
 
 ---
 
-## 3. Fresh audit of the changed code
+## 3. Bugs found and fixed during this pass
 
-### 3.1 Borrow accrual is safe against re-entry
-`hoursHeld` is derived from the immutable `openedAt` and recomputed each tick. It is **not** persisted incrementally, so no double-count across ticks, restarts, or the 500-entry history trim. Correct.
+The restart itself surfaced real defects that only appear once a fresh process runs the new code — exactly the class of thing a static read misses.
 
-### 3.2 Net-PnL stop cannot be evaded by carry
-The stop compares `netPnl <= -stopUsd`. Because carry only ever subtracts, the stop can fire *earlier* than a mark-only check — never later. That is the safe direction. Verified by inspection; no test yet exercises a multi-day carry-only breach. **Recommendation:** add a simulated `openedAt` 30 days back test asserting the stop fires with flat price. (Low priority.)
+### 3.1 Perps tab showed zeros when disabled (High — observability)
+`view()` read `this.profit`, but `this.profit` is only set inside `tick()`, and `engine.ts` only called `tick()` when `enabled`. So a disabled sleeve reported `baseline 0 / ready false / budget 0` forever — misleading, since the whole point is to preview the budget before arming.
+**Fix:** `view()` computes the signal on demand; `engine.ts` always calls the sleeve's read-only path.
 
-### 3.3 Sizing invariant remains non-negative-safe
-Every term in `deployableSleeveUsd` is `max(0, ·)`-guarded, and `maxMarginUsd<=0` becomes `+Infinity` (not 0), so "uncapped" deploys profit rather than blocking it. `Number.isFinite(budget)` guard rejects the Infinity-only corner (all terms infinite is impossible since equity/cash are finite). Correct.
+### 3.2 Boot-time zero-equity signal was cached permanently (High — correctness of displayed risk)
+First `view()` call at boot ran before chain balances synced, producing `currentEquityUsd: 0`. Caching that sample froze the tab at zero even after balances arrived.
+**Fix:** cached signal is treated as stale unless `currentEquityUsd > 0 && ready`, forcing recompute. Verified: budget self-heals from 0 → $154.51 as chain sync completes.
 
-### 3.4 Wrapper staleness check
-`perpProfit.ts` re-reads the whole archive + tape on each tick. With 100 archive samples and ~320 fills that is trivial, but it grows unbounded over months. **Recommendation (Low):** if the archive ever exceeds a few thousand rows, cache with an mtime check. Not a correctness issue.
+### 3.3 Mark price invisible while disabled (Medium)
+The feed only ran inside `tick()`, so `markPrice: 0` when disabled.
+**Fix:** added `observe()` — a read-only mark refresh that never sizes or trades. Verified mark $118.61 / healthy.
 
-### 3.5 Confirmed no new precedence/encoding issues
-`haltClosesOpen` is optional in the type and defaults false, so existing behavior is preserved for any caller that omits it. `renameSync` import added; no partial-write window.
+### 3.4 Main state file written non-atomically (High — data integrity)
+`store.ts persistNow()` used a plain `writeFileSync` of the entire state (balances, orders, positions, equity history) to a fixed path. A crash mid-write could truncate it and corrupt the live book on restart. `journal.ts` and `history.ts` already used tmp+rename; the main store did not.
+**Fix:** tmp file + `renameSync` (atomic on POSIX), matching the other stores. Verified: state file intact, no leftover `.tmp` after restart.
+
+### 3.5 Birdeye error was opaque (Low)
+`meme.ts` threw bare `HTTP 400` with no detail, hiding quota messages like "Compute units usage limit exceeded."
+**Fix:** surface the API's own `message` field.
+
+### 3.6 Unbounded fetch in perp broker (Low)
+A positions query had no timeout and could hang. **Fix:** `AbortSignal.timeout(15s)`.
+
+### 3.7 Made carry accrual directly testable (Medium)
+Extracted `borrowAccrualUsd()` as a named pure function; added tests proving linear accrual, idempotence, non-negative safety, and that a flat-price position still accumulates carry.
 
 ---
 
-## 4. Verification performed
+## 4. Items reviewed and judged correct (no change)
 
-- `npx tsc --noEmit` → clean.
-- `npx tsx --test test/perps.test.ts test/perpProfit.test.ts` → **26/26 pass** (includes new liquidation-reject and atomic-write tests).
-- `npm test` → 119 tests, **117 pass, 0 fail, 2 skipped**.
-- Live-record check: detects **$527.57** lifetime realized (tape grew since last check), $164.39 eligible, deploys the entire $164.39 under the new policy.
+- **Sizing invariant:** every term `max(0, ·)`-guarded; `maxMarginUsd<=0` ⇒ uncapped, bounded by the 10% equity cap. Budget collapses to 0 at/below baseline — never negative, never touches base capital.
+- **Realized-PnL double-count:** used as a *cap* not an addend. Correct.
+- **Stop-inside-liquidation:** live safety depends on the venue-reported liquidation price plus a hard reject; covered by tests for both long and short.
+- **Ledger corruption:** parses defensively; defaults to safe empty state.
+- **Feed anomaly gate:** shares the spot oracle's jump gate; glitchy prints cannot open a position.
+- **No secrets:** perps feed keyless; `.env` untracked; `.env.example` documents all knobs.
+- **`setInterval` timers:** all cleared in `stop()`.
 
 ---
 
 ## 5. Remaining known limitations (honest)
 
-1. **Carry accrual has no dedicated time-travel test.** Logic is correct by inspection; a 30-day `openedAt` test would lock it. Low priority.
-2. **Live process is stale** until the launchd agent restarts — the running `:3000` binary predates all of this.
-3. **No basis/carry trade** (unchanged decision): Jupiter swap vs perps mark gap is ~0.06%, too thin to harvest; only hedge/overlay remain.
-4. **`PERPS_ENABLED` still unset** on the live plist. Perps remain inert until deliberately enabled.
+1. **No basis/carry yield trade** — swap vs perps mark gap is ~0.06%, too thin; hedge/overlay only (unchanged decision).
+2. **Carry rate is modeled, not fetched live.** `hourlyBorrowPct` is a config constant; the venue's actual rate can drift. The estimate is conservative and configurable. A future enhancement is to read the live rate from `pool-info`.
+3. **`PERPS_ENABLED` still unset** — sleeve inert by design until deliberately armed.
+4. **Profit detector re-reads full archive + tape each call.** Trivial at current size (100 samples / 315 fills); worth an mtime cache if it grows to thousands.
 
 ---
 
-## 6. Conclusion
+## 6. Verification performed
 
-All High/Medium findings are fixed with tests where behavior is safety-critical. Defaults now honor "use the entire PnL" while keeping the 10% equity cap as the outer guardrail — the sleeve can deploy all earned profit today, and only a very large profit would meet the cap (one env var away from raising). The sleeve stays disabled by default, cannot touch spot base capital, and its own loss ceiling is now judged on carry-inclusive net PnL.
+- `npx tsc --noEmit` → clean.
+- `npx tsx --test test/perps.test.ts test/perpProfit.test.ts` → 28/28 pass.
+- `npm test` → 121 tests, **119 pass, 0 fail, 2 skipped**.
+- Live acceptance: bot restarted, `/api/perps` shows real mark/equity/profit, dashboard renders correctly, state file intact with no `.tmp` residue, spot book healthy throughout.
+
+---
+
+## 7. Conclusion
+
+Three audit passes have closed every High/Medium finding, with the restart-driven pass catching four defects a static read would have missed: a disabled sleeve reporting zeros, a permanently-cached zero-equity signal, an invisible mark, and a non-atomic write of the main state file. The sleeve now shows accurate live numbers while remaining disabled by default, deploys the entire eligible profit up to a 10% equity safety ceiling, and cannot touch spot base capital.
