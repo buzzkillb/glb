@@ -236,6 +236,8 @@ export interface PerpsState {
     /** Equity at the earliest point in our own record (never a literal). */
     baselineEquityUsd: number;
     baselineSource: 'archive' | 'journal' | 'none';
+    /** Live equity the detector observed (echoed for debuggability). */
+    currentEquityUsd: number;
     /** max(0, equity - baseline): genuinely earned net profit. */
     newProfitUsd: number;
     /** Liquid USDC — the only money that can be posted as perp margin. */

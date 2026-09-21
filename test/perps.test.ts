@@ -8,6 +8,7 @@ import path from 'node:path';
 process.env.PERP_STATE_DIR = mkdtempSync(path.join(tmpdir(), 'perps-test-'));
 
 import {
+  borrowAccrualUsd,
   computeSleeveBudget,
   decideSleeveAction,
   stopInsideLiquidation,
@@ -201,8 +202,7 @@ test('perps ledger is stored in its own file, separate from the spot book', () =
   assert.match(file, /perps-live\.json$/);
 });
 
-test('a venue liquidation price CLOSER than our stop forces a hard reject', () => {
-  // Long with leverage 3: liquidation at -33% would be far; force it closer.
+test('a venue liquidation price CLOSER than our stop forces a hard reject', () => {  // Long with leverage 3: liquidation at -33% would be far; force it closer.
   // Our stop is 25% of MARGIN = 25/3 = 8.33% adverse price move.
   // A liquidation only 5% away must be rejected (venue would fire first).
   const stopPct = 0.25;
@@ -214,6 +214,30 @@ test('a venue liquidation price CLOSER than our stop forces a hard reject', () =
   // Short side, mirrored.
   assert.equal(stopInsideLiquidation('short', 100, 105, stopPct, lev), false);
   assert.equal(stopInsideLiquidation('short', 100, 133, stopPct, lev), true);
+});
+
+test('carry accrues linearly and is 0-safe for non-positive inputs', () => {
+  // $10,000 notional, 0.0006%/hr, 24h -> 10000*0.000006*24 = 1.44 USD.
+  assert.ok(Math.abs(borrowAccrualUsd(10_000, 0.000006, 24) - 1.44) < 1e-9);
+  // Idempotent: same inputs => same output (safe to recompute every tick).
+  assert.equal(borrowAccrualUsd(10_000, 0.000006, 24), borrowAccrualUsd(10_000, 0.000006, 24));
+  // Negative/NaN inputs must never produce a negative cost.
+  assert.equal(borrowAccrualUsd(-5, 0.000006, 24), 0);
+  assert.equal(borrowAccrualUsd(10_000, -0.5, 24), 0);
+  assert.equal(borrowAccrualUsd(10_000, 0.000006, -1), 0);
+});
+
+test('a long-held, flat-price position is stopped by carry alone', () => {
+  // 30 days at a flat mark: only borrow accumulates. This must trip the stop
+  // even though the price never moved, which the mark-only check would miss.
+  const notional = 10_000;
+  const stopUsd = 250; // 25% of a $1,000 margin
+  const borrow30d = borrowAccrualUsd(notional, 0.000006, 24 * 30); // ~43.2
+  assert.ok(borrow30d < stopUsd, 'carry is a slow bleed, not an instant stop');
+  // But it is non-zero and grows — the ceiling is no longer blind to it.
+  assert.ok(borrow30d > 0);
+  const borrow90d = borrowAccrualUsd(notional, 0.000006, 24 * 90);
+  assert.ok(borrow90d > borrow30d, 'carry grows with time');
 });
 
 test('perps ledger writes atomically (no .tmp left behind, valid JSON)', () => {

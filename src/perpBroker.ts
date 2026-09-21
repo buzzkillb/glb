@@ -217,7 +217,7 @@ export class PerpBroker {
   async positions(walletAddress: string): Promise<PerpPosition[] | null> {
     const url = `${this.opts.apiUrl.replace(/\/$/, '')}/positions?walletAddress=${encodeURIComponent(walletAddress)}`;
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
       if (!res.ok) return null;
       const body = (await res.json()) as { dataList?: unknown[] };
       return Array.isArray(body.dataList) ? (body.dataList as PerpPosition[]) : [];

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppConfig } from './config.js';
 import type {
@@ -51,6 +51,7 @@ function emptyPerpsState(): import('./types.js').PerpsState {
     profit: {
       baselineEquityUsd: 0,
       baselineSource: 'none',
+      currentEquityUsd: 0,
       newProfitUsd: 0,
       freeCashUsd: 0,
       lifetimeRealizedUsd: 0,
@@ -785,10 +786,17 @@ export class StateStore extends EventEmitter {
       mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
       // SECURITY (audit M2): state files contain balances/PnL/orders — restrict
       // to owner-only so other local users on a shared machine can't read them.
-      writeFileSync(StateStore.fileFor(this.cfg.mode), JSON.stringify(this.persistedPayload()), {
+      // ATOMICITY (audit #3): write a sibling temp file then rename over the
+      // target. rename is atomic on POSIX, so a crash mid-write can never leave
+      // a truncated state file (which would corrupt balances/orders/positions).
+      // Matches the journal/history/perps stores, which already do this.
+      const file = StateStore.fileFor(this.cfg.mode);
+      const tmp = `${file}.tmp`;
+      writeFileSync(tmp, JSON.stringify(this.persistedPayload()), {
         encoding: 'utf8',
         mode: 0o600,
       });
+      renameSync(tmp, file);
     } catch (e) {
       console.warn(`[persist] write failed: ${(e as Error).message}`);
     }

@@ -145,7 +145,18 @@ export class MemeStrategy {
       signal: AbortSignal.timeout(15000),
       headers: { 'X-API-KEY': this.cfg.birdeyeApiKey, accept: 'application/json' },
     });
-    if (!res.ok) throw new Error(`birdeye HTTP ${res.status}`);
+    if (!res.ok) {
+      // Surface the API's own message: a 400 here is usually a quota/limit
+      // notice ("Compute units usage limit exceeded"), not a malformed request.
+      let detail = '';
+      try {
+        const body = (await res.clone().json()) as { message?: string };
+        if (body?.message) detail = ` — ${body.message}`;
+      } catch {
+        /* body not JSON; keep the status only */
+      }
+      throw new Error(`birdeye HTTP ${res.status}${detail}`);
+    }
     const json = (await res.json()) as {
       data?: { items?: BirdeyeCandle[] };
     };

@@ -204,3 +204,23 @@ function clamp(v: number, lo: number, hi: number): number {
   if (!Number.isFinite(v)) return lo;
   return Math.min(hi, Math.max(lo, v));
 }
+
+/**
+ * Carry (borrow/funding) owed on an open perp, as a USD cost.
+ *
+ * Recomputed from the immutable `openedAt` each tick rather than persisted
+ * incrementally, so it can never double-count across ticks or restarts. Kept as
+ * a named pure function so the accrual is directly testable — a slow carry
+ * bleed must be able to trip the stop even when the mark is flat.
+ */
+export function borrowAccrualUsd(
+  notionalUsd: number,
+  hourlyBorrowPct: number,
+  hoursHeld: number
+): number {
+  return (
+    Math.max(0, notionalUsd) *
+    Math.max(0, hourlyBorrowPct) *
+    Math.max(0, hoursHeld)
+  );
+}

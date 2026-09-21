@@ -5,7 +5,7 @@ import { PerpBroker } from './perpBroker.js';
 import { PerpPriceFeed, PERP_MARKETS } from './perpPrice.js';
 import { PerpStore, type PerpPosition } from './perpStore.js';
 import {
-  computeSleeveBudget,
+  borrowAccrualUsd,
   decideSleeveAction,
   stopInsideLiquidation,
   type PerpSleeveConfig,
@@ -104,9 +104,31 @@ export class PerpSleeve {
    * either manage an open position or consider opening one. Returns void;
    * read state via `view()` for the dashboard.
    */
+  /**
+   * Read-only observability pass: refresh the mark feed so the dashboard shows
+   * a live price even when the sleeve is disabled. Never sizes or trades, and
+   * never touches the ledger — safe to call unconditionally.
+   */
+  async observe(): Promise<void> {
+    const asset = this.cfg.strategies.grid.baseAsset;
+    const mint = PERP_MARKETS[asset];
+    if (!mint) return;
+    try {
+      await this.feed.fetch(mint);
+      this.markHealthy = this.feed.healthy();
+      this.feedReject = this.feed.rejectReason();
+    } catch (e) {
+      this.feedReject = `mark fetch failed: ${(e as Error).message}`;
+      this.markHealthy = false;
+    }
+  }
+
   async tick(): Promise<void> {
     const p = this.cfg.strategies.perps ?? DEFAULT_PERPS_CONFIG;
     if (!p.enabled) {
+      // Still surface a live mark so the dashboard tab is informative rather
+      // than blank while the sleeve is off. Read-only: no sizing, no orders.
+      await this.observe();
       this.lastDecision = 'sleeve disabled';
       return;
     }
@@ -228,7 +250,7 @@ export class PerpSleeve {
     // charge carry on open positions; ignoring it would make the stop/halt
     // ceilings optimistically late.
     const hoursHeld = Math.max(0, (Date.now() - pos.openedAt) / 3_600_000);
-    const borrowUsd = notional * p.hourlyBorrowPct * hoursHeld;
+    const borrowUsd = borrowAccrualUsd(notional, p.hourlyBorrowPct, hoursHeld);
     const netPnl = pnl - borrowUsd; // PnL the safety ceilings must judge
 
     const stopUsd = pos.collateralUsd * p.stopLossMarginPct;
@@ -456,13 +478,22 @@ export class PerpSleeve {
    */
   view(): PerpsState {
     const p = this.cfg.strategies.perps ?? DEFAULT_PERPS_CONFIG;
+    // The dashboard must show the live signal even while the sleeve is disabled
+    // (disabled => tick() never runs, so `this.profit` stays null and the tab
+    // would otherwise read zeros). Compute on demand. A cached signal with a
+    // zero/invalid equity is treated as stale: at boot the chain balances may
+    // not have synced yet, and caching that first sample would freeze the tab.
+    const profit =
+      this.profit && this.profit.currentEquityUsd > 0 && this.profit.ready
+        ? this.profit
+        : this.refreshProfit();
     const led = this.ledger.snapshotLedger();
     const equity = this.equityUsd();
     const mark = this.feed.lastPrice();
     const gridLong = mark > 0 ? this.gridNetLongUsd(mark) : 0;
     const eligible = Math.max(0, equity - led.principalFloorUsd);
     // Deployable budget comes from the LIVE profit signal, not a stored floor.
-    const budget = this.profit
+    const budget = profit
       ? deployableSleeveUsd(
           {
             profitSharePct: p.profitSharePct,
@@ -471,7 +502,7 @@ export class PerpSleeve {
             maxEquityPct: p.maxEquityPct,
             maxMarginUsd: p.maxMarginUsd,
           },
-          this.profit
+          profit
         )
       : 0;
     const pos = led.position;
@@ -492,17 +523,20 @@ export class PerpSleeve {
       principalFloorUsd: led.principalFloorUsd,
       peakEquityUsd: led.peakEquityUsd,
       outstandingMarginUsd: led.outstandingMarginUsd,
-      eligibleProfitUsd: this.profit ? this.profit.newProfitUsd : eligible,
+      eligibleProfitUsd: profit ? profit.newProfitUsd : eligible,
       profit: {
-        baselineEquityUsd: this.profit?.baselineEquityUsd ?? 0,
-        baselineSource: this.profit?.baselineSource ?? 'none',
-        newProfitUsd: this.profit?.newProfitUsd ?? 0,
-        freeCashUsd: this.profit?.freeCashUsd ?? 0,
-        lifetimeRealizedUsd: this.profit?.lifetimeRealizedUsd ?? 0,
-        windowRealizedUsd: this.profit?.windowRealizedUsd ?? 0,
-        sampleFills: this.profit?.sampleFills ?? 0,
-        ready: this.profit?.ready ?? false,
-        note: this.profit?.note ?? 'not computed yet',
+        baselineEquityUsd: profit?.baselineEquityUsd ?? 0,
+        baselineSource: profit?.baselineSource ?? 'none',
+        // Echo the live inputs the detector saw — makes "budget is 0" debuggable
+        // instead of opaque when chain balances are stale/unavailable.
+        currentEquityUsd: profit?.currentEquityUsd ?? equity,
+        newProfitUsd: profit?.newProfitUsd ?? 0,
+        freeCashUsd: profit?.freeCashUsd ?? 0,
+        lifetimeRealizedUsd: profit?.lifetimeRealizedUsd ?? 0,
+        windowRealizedUsd: profit?.windowRealizedUsd ?? 0,
+        sampleFills: profit?.sampleFills ?? 0,
+        ready: profit?.ready ?? false,
+        note: profit?.note ?? 'not computed yet',
       },
       sleeveBudgetUsd: budget,
       edgePct: equity > 0 ? budget / equity : 0,

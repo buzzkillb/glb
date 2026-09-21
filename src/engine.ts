@@ -247,7 +247,9 @@ export class StrategyEngine {
     // PERPS SLEEVE: only when enabled. Runs AFTER grid/DCA so it sizes the
     // hedge against the *current* grid inventory, and isolated so any failure
     // here can never interrupt the spot book.
-    if (this.perps && this.cfg.strategies.perps?.enabled) {
+    if (this.perps) {
+      // Always refresh the mark for the dashboard tab (read-only when disabled),
+      // then run the full sleeve only when explicitly enabled.
       try {
         await this.perps.tick();
       } catch (e) {
