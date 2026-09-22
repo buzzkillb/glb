@@ -40,8 +40,10 @@ export interface PerpSleeveConfig {
   maxMarginUsd: number;
   /** When the loss ceiling trips, also flatten any open position (default off). */
   haltClosesOpen?: boolean;
-  /** Leverage ceiling (2-3 recommended). */
+  /** Absolute leverage ceiling — the hard upper bound smartLeverage() respects. */
   maxLeverage: number;
+  /** Volatility multiple: survive this many 24h ranges before the stop hits. */
+  leverageVolMultiplier?: number;
   /** Hedge: fraction of grid net-long delta to neutralize (0..1). */
   hedgeRatio: number;
   /** Leverage for the delta-neutral hedge (capped by maxLeverage). */
@@ -77,6 +79,89 @@ export interface SleeveInputs {
    * Undefined = fall back to the legacy floor-based computation.
    */
   deployableMarginUsd?: number;
+  /**
+   * Recent 24h price range as a fraction (e.g. 0.038 = 3.8%). Live volatility
+   * input that drives smartLeverage(). 0/undefined = unknown, which fails SAFE
+   * (leverage pinned to 1). Sourced from the perps venue mark feed's high/low.
+   */
+  vol24RangePct?: number;
+}
+
+/**
+ * SMART LEVERAGE — market-derived, not a static guess.
+ *
+ * A leveraged position is stopped once the adverse move reaches
+ * stopLossMarginPct/leverage in price terms. We therefore pick the LARGEST
+ * leverage that still lets the position survive an adverse move of
+ * `volMultiple` x the recent 24h range before our stop fires:
+ *
+ *     maxSafe = stopLossMarginPct / (volMultiple * vol24RangePct)
+ *
+ * The point is to be shaken out only by a genuinely decisive move, never by
+ * ordinary intraday noise. Calm markets permit more leverage; turbulent ones
+ * force less. The result is clamped to [1, ceiling]. When volatility is unknown
+ * we fail SAFE at 1 — never guess a big number.
+ */
+export function smartLeverage(
+  stopLossMarginPct: number,
+  vol24RangePct: number,
+  volMultiple: number,
+  ceiling: number
+): number {
+  const ceil = Math.max(1, ceiling);
+  const stop = clamp(stopLossMarginPct, 0, 1);
+  const vol = Math.max(0, vol24RangePct);
+  const mult = Math.max(0.1, volMultiple);
+  if (!(vol > 0) || !(stop > 0)) return 1;
+  const maxSafe = stop / (mult * vol);
+  return clamp(maxSafe, 1, ceil);
+}
+
+export interface SmartLeverageView {
+  /** Smart leverage with the configured ceiling applied. */
+  recommended: number;
+  /** Largest leverage the volatility alone permits, before the ceiling. */
+  maxSafe: number;
+  /** Configured hard ceiling. */
+  ceiling: number;
+  /** Lower bound we will ever use (always 1). */
+  floor: number;
+  /** The 24h range that drove the number (fraction). */
+  vol24RangePct: number;
+  /** Human-readable derivation. */
+  explanation: string;
+}
+
+/**
+ * Full view of the smart leverage RANGE for the dashboard/config: the floor we
+ * never go below, the volatility-derived safe maximum, and the configured
+ * ceiling. Presents the working range so an operator can see exactly how risky
+ * the sleeve is allowed to be right now.
+ */
+export function smartLeverageView(
+  stopLossMarginPct: number,
+  vol24RangePct: number,
+  volMultiple: number,
+  ceiling: number
+): SmartLeverageView {
+  const ceil = Math.max(1, ceiling);
+  const stop = clamp(stopLossMarginPct, 0, 1);
+  const vol = Math.max(0, vol24RangePct);
+  const mult = Math.max(0.1, volMultiple);
+  const maxSafe = vol > 0 && stop > 0 ? stop / (mult * vol) : 1;
+  return {
+    recommended: smartLeverage(stopLossMarginPct, vol24RangePct, volMultiple, ceiling),
+    maxSafe,
+    ceiling: ceil,
+    floor: 1,
+    vol24RangePct: vol,
+    explanation:
+      maxSafe < 1
+        ? 'volatility high — pinned to 1x (full collateral, no borrow)'
+        : `range ${(vol * 100).toFixed(2)}% of price; stop ${(stop * 100).toFixed(0)}% margin; ` +
+          `survives ${mult.toFixed(1)}x that range -> ${Math.min(maxSafe, ceil).toFixed(2)}x` +
+          (maxSafe > ceil ? ` (ceiling ${ceil}x binds)` : ''),
+  };
 }
 
 export interface SleeveDecision {
@@ -180,7 +265,16 @@ export function decideSleeveAction(
     // liquidation). If even that cannot cover the excess, we trim as much as the
     // budget allows and say so plainly.
     const minLev = Math.max(1, cfg.hedgeLeverage ?? 1);
-    const maxLev = Math.max(minLev, cfg.hedgeLeverageMax ?? minLev);
+    // The hedge's own ceiling AND the volatility-derived safe maximum: even when
+    // an operator raises hedgeLeverageMax, turbulence still pulls the effective
+    // hedge leverage down to something the stop can survive.
+    const smartCap = smartLeverage(
+      cfg.stopLossMarginPct,
+      inputs.vol24RangePct ?? 0,
+      cfg.leverageVolMultiplier ?? 1.2,
+      cfg.hedgeLeverageMax ?? 1
+    );
+    const maxLev = Math.max(minLev, Math.min(cfg.hedgeLeverageMax ?? minLev, smartCap));
     const targetNotional = excessUsd * clamp(cfg.hedgeRatio, 0, 1);
     // Leverage that exactly covers targetNotional with the available budget.
     const neededLev = budget > 0 ? targetNotional / budget : Number.POSITIVE_INFINITY;
@@ -205,16 +299,35 @@ export function decideSleeveAction(
     return idle(`trim wanted ${wantMargin.toFixed(2)} < venue minimum`);
   }
 
-  // Tier 3: small directional overlay.
+  // Tier 3: profit-seeking directional overlay.
+  //
+  // This is where "slightly riskier leverage to make more profit" lives. The
+  // leverage is NOT a static 3x — it is derived from live volatility by
+  // smartLeverage(), so we take the most leverage the market safely allows up to
+  // the configured ceiling, and back off automatically when turbulence rises.
+  // The fixed `clamp(cfg.maxLeverage, 1, 3)` this replaced silently ignored
+  // PERPS_MAX_LEVERAGE above 3.
   if (cfg.overlayEnabled) {
     const overlayBudget = budget * clamp(cfg.overlayBudgetPct, 0, 1);
     if (overlayBudget >= PERP_MIN_COLLATERAL_USD) {
+      const lev = smartLeverage(
+        cfg.stopLossMarginPct,
+        inputs.vol24RangePct ?? 0,
+        cfg.leverageVolMultiplier ?? 1.2,
+        cfg.maxLeverage
+      );
+      const v = smartLeverageView(
+        cfg.stopLossMarginPct,
+        inputs.vol24RangePct ?? 0,
+        cfg.leverageVolMultiplier ?? 1.2,
+        cfg.maxLeverage
+      );
       return {
         marginUsd: overlayBudget,
-        lev: clamp(cfg.maxLeverage, 1, 3),
+        lev,
         side: 'long',
         intent: 'overlay',
-        reason: 'overlay: directional bias from grid signals',
+        reason: `overlay ${lev.toFixed(2)}x (${v.explanation})`,
       };
     }
   }

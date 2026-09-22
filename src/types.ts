@@ -1,4 +1,5 @@
 import type { GridConfig, DcaConfig, MemeSlotConfig, PerpSleeveConfig } from './config.js';
+import type { SmartLeverageView } from './perpStrategy.js';
 
 export type Side = 'BUY' | 'SELL';
 
@@ -276,6 +277,14 @@ export interface PerpsState {
   withinExposureCap: boolean;
   /** Hedge notional currently held toward the excess (progress display). */
   hedgeNotionalUsd: number;
+  /** Configured hard leverage ceiling for the sleeve. */
+  maxLeverage: number;
+  /**
+   * Smart leverage working range derived from live volatility: floor (1x), the
+   * volatility-derived safe maximum, and the configured ceiling. This is the
+   * answer to "what leverage range can this use" — market-derived, not static.
+   */
+  leverageRange: SmartLeverageView;
   realizedPnlUsd: number;
   feesPaidUsd: number;
   open: {

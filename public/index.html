@@ -422,6 +422,13 @@
         <div class="card"><div class="k">Trim target (excess)</div><div class="v" id="pTrimTarget">—</div></div>
       </div>
       <div class="row2">
+        <div class="card"><div class="k">Smart leverage (now)</div><div class="v" id="pLevNow">—</div></div>
+        <div class="card"><div class="k">Leverage ceiling</div><div class="v" id="pLevCeiling">—</div></div>
+      </div>
+      <div class="row2">
+        <div class="card" style="grid-column:1 / -1"><div class="k">Leverage range (volatility-derived)</div><div class="v" id="pLevRange" style="font-size:13px">—</div></div>
+      </div>
+      <div class="row2">
         <div class="card"><div class="k">Position</div><div class="v" id="pPosition">—</div></div>
         <div class="card"><div class="k">Liquidation buffer</div><div class="v" id="pLiq">—</div></div>
       </div>
@@ -1109,6 +1116,17 @@
     // we are happy to keep, and the trim targets only the excess above it.
     set('pExpCap', pctv(p.maxNetExposurePct) + ' · ' + money(p.exposureCapUsd), p.withinExposureCap ? 'pos' : 'warn');
     set('pTrimTarget', money(p.targetHedgeNotionalUsd) + (p.targetHedgeNotionalUsd > 0 ? ' @ ' + money(p.marginToNeutralizeUsd) + ' margin' : ''), p.targetHedgeNotionalUsd > 0 ? 'warn' : 'muted');
+    // Leverage range: derived from LIVE volatility, not a static guess. Show the
+    // floor, the volatility-derived safe maximum, and the ceiling, so the operator
+    // sees exactly how risky the sleeve is allowed to be right now.
+    const lr = p.leverageRange || {};
+    set('pLevNow', (lr.recommended ?? 0).toFixed(2) + 'x', (lr.recommended ?? 0) >= 2 ? 'warn' : 'pos');
+    set('pLevCeiling', (lr.ceiling ?? 0).toFixed(1) + 'x', 'muted');
+    set(
+      'pLevRange',
+      `${(lr.floor ?? 1).toFixed(0)}x floor · ${(lr.maxSafe ?? 1).toFixed(2)}x vol-safe max · ${(lr.ceiling ?? 0).toFixed(1)}x ceiling — ${lr.explanation || 'n/a'}`,
+      (lr.maxSafe ?? 1) < 1 ? 'warn' : 'muted'
+    );
     set('pPnl', money(p.realizedPnlUsd), p.realizedPnlUsd >= 0 ? 'pos' : 'neg');
     set('pFees', money(p.feesPaidUsd), 'muted');
 

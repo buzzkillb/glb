@@ -7,6 +7,7 @@ import { PerpStore, type PerpPosition } from './perpStore.js';
 import {
   borrowAccrualUsd,
   decideSleeveAction,
+  smartLeverageView,
   stopInsideLiquidation,
   type PerpSleeveConfig,
   type SleeveInputs,
@@ -217,11 +218,20 @@ export class PerpSleeve {
       }
     }
 
+    // Live volatility for smartLeverage(): the venue mark feed's 24h high/low
+    // give us the real recent range. This is what makes leverage market-derived
+    // rather than a static guess — turbulence pulls the effective leverage down.
+    const vol24RangePct =
+      mark.price > 0 && mark.priceHigh24H > 0 && mark.priceLow24H > 0 && mark.priceHigh24H >= mark.priceLow24H
+        ? (mark.priceHigh24H - mark.priceLow24H) / mark.price
+        : 0;
+
     const inputs: SleeveInputs = {
       equityUsd: equity,
       ledger: this.ledger.snapshotLedger(),
       gridNetLongUsd: this.gridNetLongUsd(mark.price),
       markPrice: mark.price,
+      vol24RangePct,
     };
 
     const open = this.ledger.snapshotLedger().position;
@@ -650,6 +660,24 @@ export class PerpSleeve {
         : null,
       liquidationBufferPct,
       lastDecision: this.lastDecision,
+      // SMART LEVERAGE RANGE: derived from live volatility, not a static guess.
+      // Shows the floor we never go below, the volatility-derived safe maximum,
+      // and the configured ceiling, so the operator can see exactly how risky
+      // the sleeve is allowed to be right now.
+      maxLeverage: p.maxLeverage,
+      leverageRange: (() => {
+        const m = this.feed.mark();
+        const vol =
+          m && m.price > 0 && m.priceHigh24H > 0 && m.priceLow24H > 0
+            ? (m.priceHigh24H - m.priceLow24H) / m.price
+            : 0;
+        return smartLeverageView(
+          p.stopLossMarginPct,
+          vol,
+          p.leverageVolMultiplier ?? 1.2,
+          p.maxLeverage
+        );
+      })(),
       note:
         'Sleeve is funded ONLY by equity above the untouchable principal floor; base spot capital is never at risk.',
     };

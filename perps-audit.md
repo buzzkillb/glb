@@ -454,3 +454,66 @@ a trim, not a market-neutral conversion.**
 Perps tab now shows **Exposure cap (kept)** and **Trim target (excess)** with the
 margin it would post, plus `withinExposureCap`. `hedgeNeutral` was removed — it
 implied a goal we explicitly do not have.
+
+## 15. Smart leverage — what range can this use, and auditing for safe profit-seeking
+
+**Question:** what leverage range can this use, made smart by deriving it from our
+PnL so we can pursue slightly riskier perps leverage for more profit.
+
+### Audit findings
+
+**BUG (fixed): the overlay leverage was silently clamped to 3.**
+`lev: clamp(cfg.maxLeverage, 1, 3)` meant setting `PERPS_MAX_LEVERAGE=5` did
+nothing — the "riskier leverage" knob was inert above 3. Now the overlay uses
+`smartLeverage()`, which derives leverage from live volatility and honours the
+full ceiling.
+
+**NEW RISK CONTROL:** leverage is now **volatility-derived**, not a static guess.
+A leveraged position is stopped once the adverse move reaches
+`stopLossMarginPct / leverage` in price terms, so the largest safe leverage is:
+
+```
+maxSafe = stopLossMarginPct / (volMultiplier * vol24RangePct)
+```
+
+We survive an adverse move of `volMultiplier` (default 1.2) x the recent 24h
+range before our stop fires — i.e. we are stopped only by a *decisive* move,
+never by ordinary noise. Calm markets permit more; turbulence forces less.
+Unknown volatility **fails safe at 1x** (never guesses big). The same cap applies
+to the hedge, so raising `hedgeLeverageMax` cannot make a turbulent market
+reckless.
+
+### The range it can actually use
+Hard bounds are `[1x, PERPS_MAX_LEVERAGE]`. Within that, the live number is
+market-derived. Measured live:
+
+| Input | Value |
+|---|---|
+| SOL 24h range | **3.79%** of price |
+| margin stop | 25% |
+| survive multiple | 1.2x |
+| **vol-safe max** | **5.51x** |
+| configured ceiling | 5x |
+
+→ **recommended 5.00x** (ceiling binds, volatility is calm enough). In a 12%
+day it would drop to **1.74x**; in a 30% day to **0.69x → pinned to 1x**. So the
+honest answer to "what range": **1x floor, up to 5x in calm markets, falling
+automatically as volatility rises.** Raising the ceiling (e.g.
+`PERPS_MAX_LEVERAGE=8`) only helps if the market is calm enough to earn it —
+today it would still be ~5.5x.
+
+### Why this is "slightly riskier" but still smart
+- The stop sits 5% adverse of mark at 5x — well beyond a typical 3.79% daily
+  range, so noise cannot shake us out.
+- It is funded **only** by profit above the untouchable principal floor, so base
+  spot capital is never at risk.
+- Liquidation is never reached: the volatility bound is *derived from* the same
+  stop distance, and `stopInsideLiquidation` is verified at open.
+
+### Knobs
+`PERPS_MAX_LEVERAGE` (ceiling, default 5), `PERPS_LEVERAGE_VOL_MULTIPLIER`
+(default 1.2), `PERPS_HEDGE_LEVERAGE`, `PERPS_HEDGE_LEVERAGE_MAX`,
+`PERPS_MAX_NET_EXPOSURE_PCT`.
+
+**Verdict:** leverage is now correctly wired and volatility-bounded end to end —
+`1x … 5x` today, auto-easing to 1x under stress. Dashboard shows the live range.

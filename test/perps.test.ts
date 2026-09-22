@@ -11,6 +11,8 @@ import {
   borrowAccrualUsd,
   computeSleeveBudget,
   decideSleeveAction,
+  smartLeverage,
+  smartLeverageView,
   stopInsideLiquidation,
   type PerpSleeveConfig,
   type SleeveInputs,
@@ -317,6 +319,7 @@ test('hedge auto-scales leverage so a PnL-sized budget covers the excess delta',
     ledger: ledger({ principalFloorUsd: 10_000 }),
     gridNetLongUsd: gridDelta,
     deployableMarginUsd: budget,
+    vol24RangePct: 0.01, // calm market: volatility cap (20.8x) does not bind
   }));
   assert.equal(d.intent, 'hedge');
   // neededLev = 5650/400 = 14.125 -> within [1,15], so notional must hit delta.
@@ -407,9 +410,119 @@ test('hedge leverage never exceeds hedgeLeverageMax and reports a partial trim',
     ledger: ledger({ principalFloorUsd: 100_000 }),
     gridNetLongUsd: gridDelta,
     deployableMarginUsd: 100,
+    vol24RangePct: 0.01, // calm market: volatility cap (20.8x) does not bind here
   }));
   assert.equal(d.intent, 'hedge');
   assert.equal(d.lev, 10, 'leverage must cap exactly at hedgeLeverageMax');
   assert.ok(d.marginUsd * d.lev < gridDelta, 'partial trim must not claim to cover the delta');
   assert.match(d.reason, /partial/);
+});
+
+// ---------------------------------------------------------------------------
+// SMART LEVERAGE — market-derived, volatility-bounded, fails safe.
+// ---------------------------------------------------------------------------
+
+test('smartLeverage: calm market permits the full ceiling', () => {
+  // 1% daily range, 25% margin stop, must survive 1.2x that range.
+  // maxSafe = 0.25 / (1.2 * 0.01) = 20.83x -> clamped to the 5x ceiling.
+  const lev = smartLeverage(0.25, 0.01, 1.2, 5);
+  assert.equal(lev, 5, 'calm market must reach the configured ceiling');
+});
+
+test('smartLeverage: turbulence forces leverage DOWN below the ceiling', () => {
+  // 12% daily range, 25% stop, 1.2x survival. maxSafe = 0.25/(1.2*0.12)=1.74x.
+  const lev = smartLeverage(0.25, 0.12, 1.2, 5);
+  assert.ok(lev < 5, `turbulent market must not use the ceiling (got ${lev})`);
+  assert.ok(Math.abs(lev - 1.7361) < 0.01, `expected ~1.74x, got ${lev}`);
+});
+
+test('smartLeverage: unknown or extreme volatility fails SAFE at 1x, never guesses big', () => {
+  assert.equal(smartLeverage(0.25, 0, 1.2, 5), 1, 'no volatility data -> 1x');
+  // 30% range, 25% stop, 1.2x -> maxSafe = 0.69 < 1 -> pinned to 1.
+  assert.equal(smartLeverage(0.25, 0.3, 1.2, 5), 1, 'violent market -> 1x floor');
+});
+
+test('smartLeverage never exceeds the configured ceiling', () => {
+  for (const ceil of [1, 2, 3, 5, 10, 20]) {
+    const lev = smartLeverage(0.25, 0.005, 1.2, ceil);
+    assert.ok(lev <= ceil, `leverage ${lev} must respect ceiling ${ceil}`);
+  }
+});
+
+test('smartLeverageView reports the range and the binding constraint', () => {
+  const calm = smartLeverageView(0.25, 0.01, 1.2, 5);
+  assert.equal(calm.floor, 1);
+  assert.equal(calm.ceiling, 5);
+  assert.equal(calm.recommended, 5);
+  assert.match(calm.explanation, /ceiling 5x binds/);
+
+  const turb = smartLeverageView(0.25, 0.12, 1.2, 5);
+  assert.ok(turb.maxSafe < 5 && turb.recommended === turb.maxSafe, 'volatility must bind, not the ceiling');
+  assert.match(turb.explanation, /1\.74x/);
+
+  const violent = smartLeverageView(0.25, 0.4, 1.2, 5);
+  assert.equal(violent.recommended, 1);
+  assert.match(violent.explanation, /pinned to 1x/);
+});
+
+test('overlay leverage is volatility-derived, not a static 3x', () => {
+  // The bug this replaces: a hardcoded clamp(...,1,3) silently ignored
+  // PERPS_MAX_LEVERAGE above 3. Now a calm market with ceiling 5 must yield 5x.
+  const c = cfg({
+    enabled: true,
+    profitSharePct: 1,
+    maxEquityPct: 0.5,
+    overlayEnabled: true,
+    overlayBudgetPct: 1,
+    maxLeverage: 5,
+    leverageVolMultiplier: 1.2,
+    maxNetExposurePct: 0,
+    hedgeTriggerPct: 1, // disable hedge so the overlay tier is reached
+  });
+  const calm = decideSleeveAction(c, inputs({
+    equityUsd: 10_500,
+    ledger: ledger({ principalFloorUsd: 10_000 }),
+    gridNetLongUsd: 0,
+    deployableMarginUsd: 400,
+    vol24RangePct: 0.01,
+  }));
+  assert.equal(calm.intent, 'overlay');
+  assert.equal(calm.lev, 5, 'calm market must use the raised ceiling, not a static 3x');
+
+  const turb = decideSleeveAction(c, inputs({
+    equityUsd: 10_500,
+    ledger: ledger({ principalFloorUsd: 10_000 }),
+    gridNetLongUsd: 0,
+    deployableMarginUsd: 400,
+    vol24RangePct: 0.12,
+  }));
+  assert.equal(turb.intent, 'overlay');
+  assert.ok(turb.lev < 5, `turbulence must pull the overlay leverage down (got ${turb.lev})`);
+  assert.match(turb.reason, /overlay/);
+});
+
+test('hedge leverage is also capped by volatility, not just hedgeLeverageMax', () => {
+  // Even if an operator raises hedgeLeverageMax, a turbulent market must pull the
+  // effective hedge leverage down to something our stop can survive.
+  const c = cfg({
+    enabled: true,
+    profitSharePct: 1,
+    maxEquityPct: 0.5,
+    hedgeRatio: 1.0,
+    hedgeLeverage: 1,
+    hedgeLeverageMax: 15,
+    leverageVolMultiplier: 1.2,
+    maxNetExposurePct: 0,
+    hedgeTriggerPct: 0.15,
+    maxLeverage: 5,
+  });
+  const d = decideSleeveAction(c, inputs({
+    equityUsd: 10_500,
+    ledger: ledger({ principalFloorUsd: 10_000 }),
+    gridNetLongUsd: 5_000,
+    deployableMarginUsd: 100,
+    vol24RangePct: 0.12, // turbulent -> smart cap ~1.74x
+  }));
+  assert.equal(d.intent, 'hedge');
+  assert.ok(d.lev <= 1.7400, `hedge leverage ${d.lev} must respect the volatility cap`);
 });
