@@ -134,10 +134,34 @@ leverage results:
 | `PERPS_MAX_NET_EXPOSURE_PCT` | `0.35` | Net-long we keep; the hedge trims only the excess above it |
 | `PERPS_HEDGE_LEVERAGE` / `_MAX` | `1` / `3` | Hedge leverage floor and hard ceiling (market model still caps it) |
 | `PERPS_STOP_LOSS_MARGIN_PCT` | `0.25` | Hard stop as a fraction of posted margin |
-| `PERPS_PROFIT_SHARE_PCT` | — | Share of realized profit above the floor the sleeve may deploy |
+| `PERPS_PROFIT_SHARE_PCT` | `1.0` | Fraction of PnL above the principal floor the sleeve may deploy (the funding source) |
+| `PERPS_REALIZED_USE_PCT` | `1.0` | Fraction of banked realized PnL the sleeve may risk; `0` disables that term |
+| `PERPS_CASH_USE_PCT` | `1.0` | Physical USDC ceiling on simultaneous margin — limits how much of the PnL is postable; it can never *add* funding |
 | `PERPS_USDC_FLOOR_USD` | `USDC_MIN_RESERVE` | Hard USDC floor the sleeve may never spend, so perps cannot drain the spot book's working cash |
+| `PERPS_SHORT_ONLY` | `1` | Hard guard: refuse to open a LONG at all — the sleeve only ever shorts |
+| `PERPS_OVERLAY_SIDE` | `short` | Direction the Tier-3 overlay takes; a long needs both this `=long` and `PERPS_SHORT_ONLY=0` |
 
-### What perps consumes (and what it never touches)
+### Funding source: PnL only, and the two books do not double-deploy
+
+The sleeve is funded **exclusively from profit** — equity above the untouchable
+principal floor plus banked realized PnL. The raw USDC bag is **not** a funding
+source: `PERPS_CASH_USE_PCT` can only *limit* how much of that PnL is postable at
+once, never inflate the budget. Tests assert a $50 profit against a $100k bag
+yields exactly **$50**, and equity below the floor yields **$0**.
+
+Because that PnL is the same profit spot sizing could sweep into grid/DCA, the
+engine wires the sleeve's live claim into the spot sizer: `WalletSizer` sizes
+against **equity net of the perps claim**, so grid/DCA and perps never deploy one
+dollar of profit twice. The claim is derived live from the sleeve's own numbers
+(0 when perps is off/flat), so spot sizing is unchanged while perps is disabled.
+
+### Direction: short-only by default
+
+The sleeve **never longs** unless explicitly told to. The hedge is always a short
+(it trims net-long spot SOL), and the Tier-3 overlay defaults to `short` with a
+hard `PERPS_SHORT_ONLY=1` guard that refuses a long outright. To allow the
+overlay to go long you must set **both** `PERPS_OVERLAY_SIDE=long` and
+`PERPS_SHORT_ONLY=0` — two deliberate acts, never an accident.
 
 Our hedge is a **short**, and at this venue a short posts **USDC** as margin —
 never SOL. So the SOL fee reserve the spot book keeps (so grid/DCA can always

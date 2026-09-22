@@ -132,7 +132,9 @@ test('overlay is considered only when enabled and no hedge applies', () => {
 
   const on = decideSleeveAction(cfg({ overlayEnabled: true }), inputs({ equityUsd: 10_500, ledger: ledger({ principalFloorUsd: 10_000 }), gridNetLongUsd: 0 }));
   assert.equal(on.intent, 'overlay');
-  assert.equal(on.side, 'long');
+  // The sleeve is SHORT-ONLY by default: an overlay with no explicit direction
+  // shorts, it does not long. (Pass overlaySide:'long', shortOnly:false to long.)
+  assert.equal(on.side, 'short');
   assert.equal(on.marginUsd, 125); // 250 budget * 0.5 overlay share
 });
 

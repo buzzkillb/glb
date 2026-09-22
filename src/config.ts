@@ -238,6 +238,10 @@ export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   maxLossUsd: 75,
   overlayEnabled: false,
   overlayBudgetPct: 0.5,
+  // Short-only by default: the hedge is always a short, and the overlay defaults
+  // to short too, so the sleeve never goes long unless an operator opts in.
+  overlaySide: 'short',
+  shortOnly: true,
   baselineEquityUsd: 0,
   apiUrl: 'https://perps-api.jup.ag/v1',
   slippageBps: 100,
@@ -330,6 +334,16 @@ export interface PerpSleeveConfig {
   overlayEnabled: boolean;
   /** Fraction of sleeve budget the overlay may use. */
   overlayBudgetPct: number;
+  /**
+   * Direction the overlay takes when enabled. Defaults to 'short' so the sleeve
+   * is short-only unless an operator opts into longs. The hedge is always short.
+   */
+  overlaySide?: 'long' | 'short';
+  /**
+   * Hard guard: when true the sleeve refuses to open a LONG at all. Default
+   * true — perps only ever shorts (trim net-long spot SOL, or short overlay).
+   */
+  shortOnly?: boolean;
   /** Principal floor in USD. 0 = auto-seed to the first observed equity. */
   baselineEquityUsd: number;
   /** Jupiter Perps API base, e.g. https://perps-api.jup.ag/v1 */
@@ -457,7 +471,12 @@ export function loadConfig(): AppConfig {
       perps: {
         enabled: envBool('PERPS_ENABLED', false),
         profitSharePct: envNumber('PERPS_PROFIT_SHARE_PCT', 1.0, 0, 1),
-        // Only liquid USDC can be posted as margin; SOL is inventory.
+        // Only liquid USDC can be posted as margin; SOL is inventory. NOTE this
+        // is a PHYSICAL CEILING, not a funding source: the sleeve is funded from
+        // PnL (equity above the principal floor + banked realized PnL), and the
+        // raw bag can never ADD to that — it can only limit how much of the PnL
+        // is postable right now. Leave at 1.0 unless you want to cap how much of
+        // the liquid bag may simultaneously back a position.
         cashUsePct: envNumber('PERPS_CASH_USE_PCT', 1.0, 0, 1),
         // Fraction of banked realized PnL the sleeve may risk.
         realizedProfitUsePct: envNumber('PERPS_REALIZED_USE_PCT', 1.0, 0, 1),
@@ -490,6 +509,17 @@ export function loadConfig(): AppConfig {
         maxLossUsd: envNumber('PERPS_MAX_LOSS_USD', 75, 0, 1e9),
         overlayEnabled: envBool('PERPS_OVERLAY_ENABLED', false),
         overlayBudgetPct: envNumber('PERPS_OVERLAY_BUDGET_PCT', 0.5, 0, 1),
+        // Direction the Tier-3 overlay takes when enabled. The sleeve is
+        // SHORT-ONLY by default: the hedge is always a short (it trims net-long
+        // spot SOL), and the overlay defaults to short too, so the sleeve never
+        // goes long unless an operator explicitly opts in via overlaySide=long
+        // AND shortOnly=0.
+        overlaySide: (process.env.PERPS_OVERLAY_SIDE === 'long' ? 'long' : 'short') as
+          | 'long'
+          | 'short',
+        // Hard guard: refuse to open a LONG at all. Default on — the sleeve only
+        // ever shorts. Turn off ONLY to allow the Tier-3 overlay to go long.
+        shortOnly: envBool('PERPS_SHORT_ONLY', true),
         // Untouchable principal. Set this to lock a specific principal amount;
         // 0 auto-seeds to the first observed equity, so the sleeve must first
         // EARN profit before it can deploy anything.

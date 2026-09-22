@@ -528,6 +528,20 @@ export class PerpSleeve {
   }
 
   /**
+  /**
+   * CROSS-BOOK CLAIM: the USD of equity the sleeve has claimed for itself —
+   * margin already posted (outstanding) plus the budget it is deployable right
+   * now. The spot sizer subtracts this from equity before deriving grid/DCA
+   * budgets, so the SAME profit is never deployed by both books. Derived live
+   * from the sleeve's own numbers (no literal), and 0 when perps is off/flat —
+   * so spot sizing is unchanged whenever perps is disabled or idle.
+   */
+  spotClaimUsd(): number {
+    const v = this.view();
+    return Math.max(0, v.outstandingMarginUsd + v.sleeveBudgetUsd);
+  }
+
+  /**
    * Dashboard/API view of the sleeve. Pure read — no side effects.
    */
   view(): PerpsState {

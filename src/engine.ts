@@ -95,6 +95,12 @@ export class StrategyEngine {
     // measurement-only: it never lets the sleeve write to the spot book.
     store.perpsProvider = () => this.perps!.view();
     store.perpsLedgerProvider = () => this.perps!.ledgerView();
+    // CROSS-BOOK COORDINATION: tell the spot sizer what the sleeve has claimed,
+    // so grid/DCA size against equity NET of that claim and the two books never
+    // deploy the same PnL twice. Read-only, derived live; 0 when perps is off.
+    if (this.sizer) {
+      this.sizer.perpsClaimProvider = () => this.perps!.spotClaimUsd();
+    }
   }
 
   start(): void {

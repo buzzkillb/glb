@@ -224,3 +224,24 @@ test('USDC floor defaults to safe when unset (no accidental spot drain)', () => 
   const cfg = { profitSharePct: 1, realizedProfitUsePct: 1, cashUsePct: 1, maxEquityPct: 1, maxMarginUsd: 0 };
   assert.equal(deployableSleeveUsd(cfg, s, 0), 500);
 });
+
+test('perps is funded from PnL, not the raw bag: bag cannot inflate the budget', () => {
+  // The sleeve's funding source is PnL. A huge USDC bag must NOT inflate the
+  // budget beyond what profit/realized allow — the bag is only a physical
+  // ceiling (it can reduce, never raise). Profit here is small ($50), cash is
+  // vast ($100k): the budget must be $50, not $100k.
+  seed([{ ts: NOW - DAY, equityUsd: 10_000 }], EIGHT_FILLS);
+  const s = detectProfit('live', 10_050, 100_000);
+  const cfg = { profitSharePct: 1, realizedProfitUsePct: 1, cashUsePct: 1, maxEquityPct: 1, maxMarginUsd: 0, usdcFloorUsd: 30 };
+  // fromProfit binds at 50; the bag term (100000-30) is larger, so min() picks 50.
+  assert.equal(deployableSleeveUsd(cfg, s, 0), 50);
+});
+
+test('perps cannot deploy below the principal floor (PnL gate)', () => {
+  // Equity at/below the baseline means no profit: budget must be exactly 0 even
+  // with a full bag of cash available.
+  seed([{ ts: NOW - DAY, equityUsd: 10_000 }], EIGHT_FILLS);
+  const s = detectProfit('live', 9_500, 100_000); // equity BELOW the 10k baseline
+  const cfg = { profitSharePct: 1, realizedProfitUsePct: 1, cashUsePct: 1, maxEquityPct: 1, maxMarginUsd: 0, usdcFloorUsd: 30 };
+  assert.equal(deployableSleeveUsd(cfg, s, 0), 0);
+});

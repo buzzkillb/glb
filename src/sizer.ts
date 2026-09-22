@@ -15,6 +15,10 @@ export interface WalletSnapshot {
     cybCapUsd: number;
     hardStopRefUsd: number;
     reserveUsd: number;
+    /** Profit the perps sleeve has claimed (subtracted before spot sizing). */
+    perpsClaimUsd: number;
+    /** Equity spot books may size against, net of the perps claim. */
+    deployableEquityUsd: number;
   };
 }
 
@@ -46,6 +50,17 @@ const envNum = (k: string, f: number): number => {
 export class WalletSizer {
   constructor(private cfg: AppConfig, private jup: JupiterExec) {}
 
+  /**
+   * PERPS CLAIM: the sleeve is funded from PnL (equity above the principal floor
+   * + banked realized PnL). That is the SAME profit the periodic re-size would
+   * otherwise sweep into grid/DCA sizing, so the spot books must know the
+   * sleeve has already claimed it — otherwise both would deploy one dollar of
+   * profit twice. The engine wires this to the sleeve's live claim; when perps
+   * is disabled or flat the claim is 0 and spot sizing is unchanged. No literal
+   * anywhere: the claim is whatever the sleeve actually computed.
+   */
+  perpsClaimProvider?: () => number;
+
   static enabled(cfg: AppConfig): boolean {
     if (cfg.mode !== 'live') return false;
     const v = process.env.WALLET_AUTO_SIZE;
@@ -72,11 +87,18 @@ export class WalletSizer {
       .catch(() => 0);
     const totalUsd = usdc + sol * solUsd;
 
-    // Derive budgets from real equity.
-    const gridBudget = (totalUsd * gridPct) / Math.max(1, g.numLevels);
-    const dcaBudget = totalUsd * dcaPct;
-    const cybCap = totalUsd * cybPct;
-    const reserveUsd = Math.max(totalUsd * reservePct, usdcMinReserve);
+    // PERPS CLAIM: profit the sleeve is funded from, which spot must NOT also
+    // spend. Sizing then derives from equity NET of that claim, so grid/DCA and
+    // the perps sleeve never deploy the same PnL twice. The claim is read live
+    // (0 when perps is off/flat) — never a hardcoded number.
+    const perpsClaimUsd = Math.max(0, this.perpsClaimProvider?.() ?? 0);
+    const deployableEquityUsd = Math.max(0, totalUsd - perpsClaimUsd);
+
+    // Derive budgets from real equity, net of the perps claim.
+    const gridBudget = (deployableEquityUsd * gridPct) / Math.max(1, g.numLevels);
+    const dcaBudget = deployableEquityUsd * dcaPct;
+    const cybCap = deployableEquityUsd * cybPct;
+    const reserveUsd = Math.max(deployableEquityUsd * reservePct, usdcMinReserve);
     // Fixed-cadence DCA buy: spread the DCA budget across the VA horizon so a
     // full schedule deploys ~the budget regardless of wallet size.
     const dcaPerBuy = dcaBudget / Math.max(1, this.cfg.strategies.dca.vaHorizonBuys);
@@ -91,8 +113,10 @@ export class WalletSizer {
         dcaBudgetUsd: dcaBudget,
         dcaPerBuyUsd: dcaPerBuy,
         cybCapUsd: cybCap,
-        hardStopRefUsd: totalUsd - reserveUsd, // hard-stop reference = deployable equity
+        hardStopRefUsd: deployableEquityUsd - reserveUsd, // hard-stop ref = deployable equity
         reserveUsd,
+        perpsClaimUsd,
+        deployableEquityUsd,
       },
     };
   }

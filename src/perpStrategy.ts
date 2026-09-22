@@ -54,6 +54,16 @@ export interface PerpSleeveConfig {
   hedgeLeverageMax?: number;
   /** Hedge is a TRIM: hedge only the delta in excess of this % of equity. */
   maxNetExposurePct?: number;
+  /** Hard guard: when true the sleeve refuses to open a LONG at all. */
+  shortOnly?: boolean;
+  /** Direction the Tier-3 overlay takes when enabled (default 'short'). */
+  overlaySide?: 'long' | 'short';
+  /**
+   * Live USDC floor the sleeve may never spend. Set by loadConfig from
+   * PERPS_USDC_FLOOR_USD (default USDC_MIN_RESERVE). Optional so hand-built
+   * test configs stay valid.
+   */
+  usdcFloorUsd?: number;
   /** Hedge arms only when grid net-long exposure exceeds this fraction of equity. */
   hedgeTriggerPct: number;
   /** Stop is placed at this fraction of margin loss — must sit INSIDE liquidation. */
@@ -410,12 +420,18 @@ export function decideSleeveAction(
       // Clamp to the venue's enforced floor: a fail-safe of 1x would be rejected.
       const lev = Math.max(PERP_MIN_LEVERAGE, smartLeverage(ctx));
       const v = smartLeverageView(ctx);
+      // Direction: default short. shortOnly (default true) is a hard guard so
+      // the sleeve never goes long unless an operator opts in explicitly.
+      const wantLong = cfg.overlaySide === 'long';
+      if (wantLong && (cfg.shortOnly ?? true)) {
+        return idle('overlay wants long but shortOnly guard forbids it');
+      }
       return {
         marginUsd: overlayBudget,
         lev,
-        side: 'long',
+        side: wantLong ? 'long' : 'short',
         intent: 'overlay',
-        reason: `overlay ${lev.toFixed(2)}x (${v.explanation})`,
+        reason: `overlay ${lev.toFixed(2)}x ${wantLong ? 'long' : 'short'} (${v.explanation})`,
       };
     }
   }
