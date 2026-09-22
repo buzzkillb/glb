@@ -327,18 +327,31 @@ export class PerpBroker {
     }
   }
 
-  /** Poll a keeper-landed txid until confirmed; returns an error string or null. */
+  /**
+   * Poll a keeper-landed txid until confirmed. The keeper only returns a txid
+   * once it has landed the tx, but we still verify on-chain so we never book a
+   * position that did not actually open/close. Public RPCs are flaky, so fall
+   * back to a public endpoint if the configured one cannot see the tx.
+   */
   private async confirmTx(txid: string): Promise<string | null> {
-    const deadline = Date.now() + 60_000;
+    const rpcs = [this.opts.rpcUrl, 'https://solana-rpc.publicnode.com'];
+    const deadline = Date.now() + 75_000;
     while (Date.now() < deadline) {
-      const st = await this.conn.getSignatureStatuses([txid], { searchTransactionHistory: true });
-      const s = st.value[0];
-      if (s && (s.confirmationStatus === 'confirmed' || s.confirmationStatus === 'finalized')) {
-        return s.err ? JSON.stringify(s.err) : null;
+      for (const rpc of rpcs) {
+        try {
+          const conn = new Connection(rpc, 'confirmed');
+          const st = await conn.getSignatureStatuses([txid], { searchTransactionHistory: true });
+          const s = st.value[0];
+          if (s && (s.confirmationStatus === 'confirmed' || s.confirmationStatus === 'finalized')) {
+            return s.err ? JSON.stringify(s.err) : null;
+          }
+        } catch {
+          /* try the next RPC */
+        }
       }
       await new Promise((r) => setTimeout(r, 1500));
     }
-    return `not confirmed in 60s (${txid})`;
+    return `not confirmed in 75s (${txid})`;
   }
 
   /** GET the venue mark price for a mint (used to size long-side collateral). */

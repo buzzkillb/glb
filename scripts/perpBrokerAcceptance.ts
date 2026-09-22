@@ -29,10 +29,11 @@ async function main() {
     paper: false,
   });
   const USD = Number(process.env.PERPS_SMOKE_USD || 11);
-  console.log(`wallet ${wallet} | $${USD} short SOL | start positions=${(await positions(wallet)).length}`);
+  const SIDE = (process.env.PERPS_SMOKE_SIDE || 'short') as 'long' | 'short';
+  console.log(`wallet ${wallet} | ${USD} ${SIDE} SOL | start positions=${(await positions(wallet)).length}`);
 
   console.log('[1] broker.open...');
-  const o = await broker.open({ asset: 'SOL', side: 'short', collateralUsd: USD, leverage: 2, walletAddress: wallet, signer });
+  const o = await broker.open({ asset: 'SOL', side: SIDE, collateralUsd: USD, leverage: 2, walletAddress: wallet, signer });
   console.log('    ', JSON.stringify(o));
   if (!o.ok || !o.quote?.positionPubkey) { console.log('    OPEN FAILED'); process.exit(1); }
   const pub = o.quote.positionPubkey;
@@ -49,7 +50,7 @@ async function main() {
 
   console.log('[3] broker.close (full exit)...');
   const c = await broker.close({
-    asset: 'SOL', side: 'short',
+    asset: 'SOL', side: SIDE,
     collateralUsd: o.quote.collateralUsd ?? USD,
     notionalUsd: o.quote.notionalUsd ?? USD * 2,
     positionPubkey: pub, walletAddress: wallet, signer,
