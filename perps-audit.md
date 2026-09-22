@@ -413,3 +413,44 @@ recurred across repeated 200s.
 **Conclusion:** VWAP, history high/low, and the perps mark are all real and
 working for grid/DCA/perps. Nothing is fabricated. (CYB meme feed excluded per
 user request.)
+
+## 14. "Do we need to delta-neutral the entire bag?" — NO. Hedging the whole bag is the wrong trade.
+
+Correct instinct. The spot net-long is **not accidental risk** — it is the
+strategy's directional upside and its working capital. Forcing the perps sleeve
+to cancel all of it is actively harmful:
+
+1. **Cost**: borrow/funding is paid on the *notional*, not the margin. Hedging a
+   $5,660 book means paying carry on $5,660 every hour, which can exceed the
+   grid's spread edge and turn a profitable strategy into a fee-bleeding one.
+2. **Fragility**: reaching full neutral at the current PnL budget needs ~13.5x,
+   where ordinary SOL noise (1.85% move) stops us out — churn, not safety.
+3. **Opportunity cost**: you give up the upside you're running the strategy to
+   capture, for no reason if the exposure is within a level you're happy with.
+
+**Implemented — hedge as a TRIM, not a conversion.** New knob
+`maxNetExposurePct` (default **0.35**) is the net-long we are *happy to keep*;
+the hedge targets only the **excess above it**. `hedgeLeverageMax` default dropped
+from 15 to **3** — sane enough that our stop sits 8.3% adverse of mark, far
+outside daily noise, and far inside liquidation. If the budget can't fund the
+full excess at that leverage, it trims what it can and says `partial` — it never
+pretends to be complete.
+
+### Live measurement (as of audit)
+```
+grid net-long        $5,661   (53.9% of equity)
+exposure cap (kept)  35.0%  -> $3,674
+trim target (excess) $1,987
+budget               $409
+margin at 3x         $662  -> budget-bound: trims to ~42% exposure, then stops
+```
+So out of the box it will *partially* close the gap from 53.9% toward 35%
+exposure — deliberately, cheaply, and at a leverage our stop can survive. To
+close it fully you'd raise `PERPS_HEDGE_LEVERAGE_MAX` to ~5, at the cost of a
+tighter stop (5.1% adverse vs 8.3%). **The cap is the risk control; the sleeve is
+a trim, not a market-neutral conversion.**
+
+### Dashboard
+Perps tab now shows **Exposure cap (kept)** and **Trim target (excess)** with the
+margin it would post, plus `withinExposureCap`. `hedgeNeutral` was removed — it
+implied a goal we explicitly do not have.

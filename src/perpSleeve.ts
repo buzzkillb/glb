@@ -546,19 +546,24 @@ export class PerpSleeve {
           led.outstandingMarginUsd
         )
       : 0;
+    // TRIM target: we hedge only the exposure ABOVE the cap, not the whole bag.
+    // The spot net-long is the strategy's upside and working capital; forcing it
+    // to zero costs leverage and carry for no reason.
+    const exposureCapUsd = equity * Math.max(0, Math.min(1, p.maxNetExposurePct ?? 0));
+    const excessUsd = Math.max(0, gridLong - exposureCapUsd);
     // Leverage the hedge WOULD use right now, mirroring the auto-scaling in
     // decideSleeveAction: the smallest leverage that lets the deployable budget
-    // reach the target notional, bounded by the configured floor/ceiling. Used
-    // only to report the margin full neutrality would require, so the dashboard
-    // matches what the controller would actually do.
+    // reach the excess notional, bounded by the configured floor/ceiling. Used
+    // only to report the margin the trim would require, so the dashboard matches
+    // what the controller would actually do.
     const minLev = Math.max(1, p.hedgeLeverage ?? 1);
     const maxLev = Math.max(minLev, p.hedgeLeverageMax ?? minLev);
     const hedgeLev = Math.max(
       minLev,
       Math.min(
         maxLev,
-        gridLong > 0 && budget > 0
-          ? (gridLong * Math.max(0, Math.min(1, p.hedgeRatio))) / budget
+        excessUsd > 0 && budget > 0
+          ? (excessUsd * Math.max(0, Math.min(1, p.hedgeRatio))) / budget
           : minLev
       )
     );
@@ -611,12 +616,25 @@ export class PerpSleeve {
         pos && pos.intent === 'hedge' && gridLong > 0
           ? Math.min(1, (pos.collateralUsd * pos.leverage) / gridLong)
           : 0,
-      /** Notional the hedge must reach to fully neutralize the grid delta. */
-      targetHedgeNotionalUsd: gridLong,
-      /** True only when the book is genuinely delta-neutral (hedge notional >= delta). */
-      hedgeNeutral: !!pos && pos.intent === 'hedge' && gridLong > 0 && pos.collateralUsd * pos.leverage >= gridLong - 1e-6,
-      /** Margin required to fully neutralize the delta at the configured hedge leverage. */
-      marginToNeutralizeUsd: gridLong > 0 ? gridLong / hedgeLev : 0,
+      /** Cap we allow the spot book to stay net-long (fraction of equity). */
+      maxNetExposurePct: Math.max(0, Math.min(1, p.maxNetExposurePct ?? 0)),
+      /** USD of net-long that cap permits us to keep (never hedged). */
+      exposureCapUsd,
+      /**
+       * Notional the trim must offset — the EXCESS above the cap, not the whole
+       * delta. This is the honest target: we are capping exposure, not
+       * converting the book to market-neutral.
+       */
+      targetHedgeNotionalUsd: excessUsd,
+      /**
+       * True when the book is inside the exposure cap (trim complete). Full
+       * delta-neutrality is NOT the goal, so this replaces "hedgeNeutral".
+       */
+      withinExposureCap: gridLong <= exposureCapUsd + 1e-6,
+      /** Margin required to shed the excess at the configured hedge leverage. */
+      marginToNeutralizeUsd: excessUsd > 0 ? excessUsd / hedgeLev : 0,
+      /** Notional currently hedged toward the excess (for progress display). */
+      hedgeNotionalUsd: pos && pos.intent === 'hedge' ? pos.collateralUsd * pos.leverage : 0,
       realizedPnlUsd: led.realizedPnlUsd,
       feesPaidUsd: led.feesPaidUsd,
       open: pos

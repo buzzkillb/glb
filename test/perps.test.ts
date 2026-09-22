@@ -295,10 +295,10 @@ test('hedge sizes margin as notional/leverage — never over-hedges past neutral
   assert.ok(hedgeNotional < gridDelta, 'hedge must not exceed the delta (would become net-short)');
 });
 
-test('hedge auto-scales leverage so a PnL-sized budget neutralizes a large delta', () => {
-  // Real-world shape: grid delta (~$5,650) is far larger than the profit-funded
-  // budget (~$400). A fixed 5x could not cover it; auto-scaling must raise the
-  // hedge leverage (up to hedgeLeverageMax) so the notional EQUALS the delta.
+test('hedge auto-scales leverage so a PnL-sized budget covers the excess delta', () => {
+  // Real-world shape: grid delta (~$5,650) far exceeds the profit-funded budget
+  // (~$400). With maxNetExposurePct = 0 the target is the full delta, so
+  // auto-scaling must raise the hedge leverage up to hedgeLeverageMax.
   const budget = 400;
   const gridDelta = 5_650;
   const c = cfg({
@@ -308,6 +308,7 @@ test('hedge auto-scales leverage so a PnL-sized budget neutralizes a large delta
     hedgeRatio: 1.0,
     hedgeLeverage: 1,
     hedgeLeverageMax: 15,
+    maxNetExposurePct: 0,
     hedgeTriggerPct: 0.15,
     maxLeverage: 3,
   });
@@ -319,17 +320,76 @@ test('hedge auto-scales leverage so a PnL-sized budget neutralizes a large delta
   }));
   assert.equal(d.intent, 'hedge');
   // neededLev = 5650/400 = 14.125 -> within [1,15], so notional must hit delta.
-  assert.ok(d.lev > 5, `auto-leverage ${d.lev} must exceed a fixed 5x to neutralize`);
+  assert.ok(d.lev > 5, `auto-leverage ${d.lev} must exceed a fixed 5x to cover the delta`);
   assert.ok(d.marginUsd <= budget + 1e-9, 'must never post more margin than the budget');
   const notional = d.marginUsd * d.lev;
   assert.ok(Math.abs(notional - gridDelta) < 1e-6, `notional ${notional} must equal the delta ${gridDelta}`);
-  assert.match(d.reason, /neutral/);
 });
 
-test('hedge leverage never exceeds hedgeLeverageMax and reports a partial hedge', () => {
-  // Delta far too big for the budget even at the ceiling -> hedges as much as it
-  // can and says 'partial' rather than pretending to be neutral.
-  const gridDelta = 100_000;
+test('hedge TRIMS only the excess above the exposure cap — keeps the strategy upside', () => {
+  // This is the "be smart" requirement: we never neutralize the whole bag. With
+  // equity 10k and a 35% cap we keep $3,500 net-long and hedge only the excess.
+  const equity = 10_000;
+  const gridDelta = 6_000; // 60% exposure, well above the 15% hedge trigger
+  const capPct = 0.35;
+  const capUsd = equity * capPct; // 3,500 kept
+  const excess = gridDelta - capUsd; // 2,500 to shed
+  const c = cfg({
+    enabled: true,
+    profitSharePct: 1,
+    maxEquityPct: 0.5,
+    hedgeRatio: 1.0,
+    hedgeLeverage: 1,
+    hedgeLeverageMax: 3,
+    maxNetExposurePct: capPct,
+    hedgeTriggerPct: 0.15,
+    maxLeverage: 3,
+  });
+  const d = decideSleeveAction(c, inputs({
+    equityUsd: equity,
+    ledger: ledger({ principalFloorUsd: 9_000 }),
+    gridNetLongUsd: gridDelta,
+    deployableMarginUsd: 5_000, // ample budget
+  }));
+  assert.equal(d.intent, 'hedge');
+  // neededLev = 2500/5000 = 0.5 -> clamped to floor 1, so notional = 2500.
+  const notional = d.marginUsd * d.lev;
+  assert.ok(Math.abs(notional - excess) < 1e-6, `must hedge exactly the excess ${excess}, not the whole delta`);
+  assert.ok(notional < gridDelta, 'must NOT neutralize the entire bag');
+  // Post-hedge exposure must land at the cap, not zero.
+  const postExposure = (gridDelta - notional) / equity;
+  assert.ok(Math.abs(postExposure - capPct) < 1e-9, `post-hedge exposure ${postExposure} must equal the cap ${capPct}`);
+  assert.match(d.reason, /trim/);
+});
+
+test('hedge is idle when the book is already inside the exposure cap', () => {
+  // 20% exposure with a 35% cap -> nothing to trim. The strategy keeps its full
+  // upside; we do not spend margin to neutralize exposure we are happy with.
+  const c = cfg({
+    enabled: true,
+    profitSharePct: 1,
+    maxEquityPct: 0.5,
+    hedgeRatio: 1.0,
+    hedgeLeverage: 1,
+    hedgeLeverageMax: 3,
+    maxNetExposurePct: 0.35,
+    hedgeTriggerPct: 0.15,
+    maxLeverage: 3,
+  });
+  const d = decideSleeveAction(c, inputs({
+    equityUsd: 10_000,
+    ledger: ledger({ principalFloorUsd: 9_000 }),
+    gridNetLongUsd: 2_000, // 20% of equity -> inside the cap
+    deployableMarginUsd: 5_000,
+  }));
+  assert.equal(d.marginUsd, 0, 'inside the cap -> no margin spent hedging');
+  assert.equal(d.reason.includes('trim'), false, 'no trim should be proposed');
+});
+
+test('hedge leverage never exceeds hedgeLeverageMax and reports a partial trim', () => {
+  // Excess far too big for the budget even at the ceiling -> trims as much as it
+  // can and says 'partial' rather than pretending to be complete.
+  const equity = 200_000;
   const c = cfg({
     enabled: true,
     profitSharePct: 1,
@@ -337,17 +397,19 @@ test('hedge leverage never exceeds hedgeLeverageMax and reports a partial hedge'
     hedgeRatio: 1.0,
     hedgeLeverage: 1,
     hedgeLeverageMax: 10,
+    maxNetExposurePct: 0, // full delta is the target here
     hedgeTriggerPct: 0.15,
     maxLeverage: 3,
   });
+  const gridDelta = 100_000;
   const d = decideSleeveAction(c, inputs({
-    equityUsd: 200_000,
+    equityUsd: equity,
     ledger: ledger({ principalFloorUsd: 100_000 }),
     gridNetLongUsd: gridDelta,
     deployableMarginUsd: 100,
   }));
   assert.equal(d.intent, 'hedge');
   assert.equal(d.lev, 10, 'leverage must cap exactly at hedgeLeverageMax');
-  assert.ok(d.marginUsd * d.lev < gridDelta, 'partial hedge must not claim to cover the delta');
+  assert.ok(d.marginUsd * d.lev < gridDelta, 'partial trim must not claim to cover the delta');
   assert.match(d.reason, /partial/);
 });

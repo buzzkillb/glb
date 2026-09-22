@@ -260,12 +260,22 @@ export interface PerpsState {
   exposurePct: number;
   hedgeActive: boolean;
   hedgeCoveragePct: number;
-  /** Notional the hedge must reach to fully neutralize the grid delta. */
+  /**
+   * Cap we allow the spot book to stay net-long, as a fraction of equity. The
+   * hedge trims only the EXCESS above this — we do NOT delta-neutral the whole
+   * bag, because the spot net-long is the strategy's upside and working capital.
+   */
+  maxNetExposurePct: number;
+  /** USD of net-long the cap permits us to keep (never hedged). */
+  exposureCapUsd: number;
+  /** Notional the trim must offset: the EXCESS above the cap, not the whole delta. */
   targetHedgeNotionalUsd: number;
-  /** Margin required to fully neutralize the delta at the hedge leverage. */
+  /** Margin required to shed the excess at the hedge leverage. */
   marginToNeutralizeUsd: number;
-  /** True only when hedge notional >= grid delta (genuinely neutral). */
-  hedgeNeutral: boolean;
+  /** True when the book is inside the exposure cap (trim complete). */
+  withinExposureCap: boolean;
+  /** Hedge notional currently held toward the excess (progress display). */
+  hedgeNotionalUsd: number;
   realizedPnlUsd: number;
   feesPaidUsd: number;
   open: {

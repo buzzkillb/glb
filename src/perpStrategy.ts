@@ -46,8 +46,10 @@ export interface PerpSleeveConfig {
   hedgeRatio: number;
   /** Leverage for the delta-neutral hedge (capped by maxLeverage). */
   hedgeLeverage?: number;
-  /** Hard ceiling on the hedge's auto-scaled leverage. */
+  /** Hard ceiling on the hedge's auto-scaled leverage (stay sane/low). */
   hedgeLeverageMax?: number;
+  /** Hedge is a TRIM: hedge only the delta in excess of this % of equity. */
+  maxNetExposurePct?: number;
   /** Hedge arms only when grid net-long exposure exceeds this fraction of equity. */
   hedgeTriggerPct: number;
   /** Stop is placed at this fraction of margin loss — must sit INSIDE liquidation. */
@@ -152,42 +154,55 @@ export function decideSleeveAction(
     return idle('no deployable profit (equity at/below baseline or cash-bound)');
   }
 
-  // Tier 2: neutralize the grid's accumulated net-long delta.
+  // Tier 2: TRIM the grid's net-long delta back toward the exposure cap.
+  //
+  // We deliberately do NOT delta-neutral the entire bag. The spot net-long is
+  // the strategy's directional upside and working capital; forcing it to zero
+  // means (a) extreme leverage, (b) borrow/funding paid on notional far larger
+  // than the sleeve, and (c) giving up the edge the strategy exists to capture.
+  // Instead we hedge only the EXCESS above cfg.maxNetExposurePct of equity, so
+  // the book keeps its upside while the tail risk is capped.
   const exposurePct = inputs.equityUsd > 0 ? inputs.gridNetLongUsd / inputs.equityUsd : 0;
-  if (exposurePct >= cfg.hedgeTriggerPct && inputs.gridNetLongUsd > 0) {
-    // hedgeRatio is a NOTIONAL fraction of the delta to offset, so the required
+  const capUsd = inputs.equityUsd * clamp(cfg.maxNetExposurePct ?? 0, 0, 1);
+  // Exposure over the cap that we want to shed. With maxNetExposurePct = 0 this
+  // equals the full delta (old full-neutralization behavior).
+  const excessUsd = Math.max(0, inputs.gridNetLongUsd - capUsd);
+  if (exposurePct >= cfg.hedgeTriggerPct && inputs.gridNetLongUsd > 0 && excessUsd > 0) {
+    // hedgeRatio is a NOTIONAL fraction of the excess to offset, so the required
     // MARGIN is (targetNotional / leverage). Applying the ratio directly as
-    // margin and then leveraging it would over-hedge by a factor of the
-    // leverage (e.g. 0.8*2 = 1.6x the delta → net-short instead of neutral).
+    // margin and then leveraging it would over-hedge by a factor of the leverage
+    // (e.g. 0.8*2 = 1.6x the delta → net-short instead of neutral).
     //
-    // AUTO-LEVERAGE: a profit-sized budget is typically far smaller than the
-    // grid delta, so a FIXED hedge leverage makes neutrality unreachable (the
-    // margin needed exceeds the budget). We pick the SMALLEST leverage that lets
-    // the deployable budget reach the target notional, bounded below by the
-    // configured floor and above by hedgeLeverageMax. This is how a PnL-sized
-    // sleeve actually neutralizes a much larger book. If even hedgeLeverageMax
-    // cannot cover it, we hedge as much as the budget allows and say so plainly
-    // rather than pretending to be neutral.
+    // AUTO-LEVERAGE is bounded: a profit-sized budget is typically smaller than
+    // the excess, so a fixed leverage might not reach it. We pick the smallest
+    // leverage that lets the deployable budget fund the target notional, but
+    // never beyond hedgeLeverageMax (default 3 — sane, keeps our stop far inside
+    // liquidation). If even that cannot cover the excess, we trim as much as the
+    // budget allows and say so plainly.
     const minLev = Math.max(1, cfg.hedgeLeverage ?? 1);
     const maxLev = Math.max(minLev, cfg.hedgeLeverageMax ?? minLev);
-    const targetNotional = inputs.gridNetLongUsd * clamp(cfg.hedgeRatio, 0, 1);
+    const targetNotional = excessUsd * clamp(cfg.hedgeRatio, 0, 1);
     // Leverage that exactly covers targetNotional with the available budget.
     const neededLev = budget > 0 ? targetNotional / budget : Number.POSITIVE_INFINITY;
     const lev = clamp(neededLev, minLev, maxLev);
     const wantMargin = Math.min(budget, targetNotional / lev);
     const reachable = lev >= neededLev - 1e-9 && Number.isFinite(neededLev);
     if (wantMargin >= PERP_MIN_COLLATERAL_USD) {
+      const postExposurePct =
+        inputs.equityUsd > 0
+          ? Math.max(0, inputs.gridNetLongUsd - wantMargin * lev) / inputs.equityUsd
+          : 0;
       return {
         marginUsd: wantMargin,
         lev,
         side: 'short',
         intent: 'hedge',
         reason: reachable
-          ? `hedge grid net-long ${inputs.gridNetLongUsd.toFixed(0)}USD at ${lev.toFixed(1)}x (neutral: ${targetNotional.toFixed(0)}USD notional)`
-          : `partial hedge grid net-long ${inputs.gridNetLongUsd.toFixed(0)}USD at max ${lev.toFixed(1)}x (budget-bound)`,
+          ? `trim net-long ${inputs.gridNetLongUsd.toFixed(0)}→${capUsd.toFixed(0)}USD at ${lev.toFixed(1)}x (exposure ${(exposurePct * 100).toFixed(0)}%→${(postExposurePct * 100).toFixed(0)}% of equity)`
+          : `partial trim net-long ${inputs.gridNetLongUsd.toFixed(0)}USD at ${lev.toFixed(1)}x (budget-bound)`,
       };
     }
-    return idle(`hedge wanted ${wantMargin.toFixed(2)} < venue minimum`);
+    return idle(`trim wanted ${wantMargin.toFixed(2)} < venue minimum`);
   }
 
   // Tier 3: small directional overlay.

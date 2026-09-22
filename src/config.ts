@@ -203,12 +203,21 @@ export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   maxLeverage: 3,
   hedgeRatio: 1.0,
   // Hedging uses its own leverage, independent of maxLeverage (which caps the
-  // directional overlay). The controller AUTO-SCALES the hedge leverage up to
-  // hedgeLeverageMax so a profit-sized budget can still fully neutralize a grid
-  // delta that is much larger than the sleeve's capital. Without auto-scaling,
-  // neutrality is unreachable once the delta exceeds budget * leverage.
+  // directional overlay). The controller auto-scales from this floor up to
+  // hedgeLeverageMax when the excess delta exceeds what one unit of leverage can
+  // fund — but never further, because the hedge is a TRIM, not a conversion.
   hedgeLeverage: 1,
-  hedgeLeverageMax: 15,
+  // SANE ceiling. We deliberately do NOT crank leverage to cover a spot book many
+  // times the sleeve's size: full neutralization would bleed borrow on the whole
+  // notional and let normal price noise stop us out. 3x keeps our stop far inside
+  // liquidation and lets the hedge actually hold.
+  hedgeLeverageMax: 3,
+  // The whole point: cap net-long exposure as a fraction of equity. We do NOT
+  // delta-neutral the entire bag — the spot net-long is the strategy's upside and
+  // working capital. We only shed the EXCESS above this target, funded from
+  // profit, at sane leverage. 0 disables the cap (hedge relative to the full
+  // delta, the old behavior).
+  maxNetExposurePct: 0.35,
   hedgeTriggerPct: 0.15,
   stopLossMarginPct: 0.25,
   maxLossUsd: 75,
@@ -261,14 +270,19 @@ export interface PerpSleeveConfig {
    */
   hedgeLeverage: number;
   /**
-   * Hard ceiling on auto-scaled hedge leverage. The controller picks the
-   * smallest leverage that lets the deployable budget reach the target hedge
-   * notional, and never exceeds this. Bounds liquidation risk when the grid
-   * delta is large relative to the sleeve budget. Default 15 — high enough that
-   * a PnL-sized budget can neutralize a grid delta several times larger, while
-   * our hard stop still sits far inside liquidation (verified at open).
+   * Hard ceiling on auto-scaled hedge leverage. The controller picks the smallest
+   * leverage that lets the deployable budget reach the target notional, never
+   * exceeding this. Kept intentionally low (default 3) because the hedge is a
+   * trim, not a full neutralization: high leverage would stop out on ordinary
+   * price noise and bleed borrow on notional far larger than the sleeve.
    */
   hedgeLeverageMax: number;
+  /**
+   * Cap on net-long exposure as a fraction of equity. The hedge targets only the
+   * EXCESS above this, so the strategy keeps its directional upside and we never
+   * pay to neutralize the whole bag. 0 = no cap (hedge against the full delta).
+   */
+  maxNetExposurePct: number;
   /** Hedge arms only when grid net-long exposure exceeds this fraction of equity. */
   hedgeTriggerPct: number;
   /** Stop is placed at this fraction of margin loss — must sit INSIDE liquidation. */
@@ -420,7 +434,8 @@ export function loadConfig(): AppConfig {
         maxLeverage: envNumber('PERPS_MAX_LEVERAGE', 3, 1, 10),
         hedgeRatio: envNumber('PERPS_HEDGE_RATIO', 1.0, 0, 1),
         hedgeLeverage: envNumber('PERPS_HEDGE_LEVERAGE', 1, 1, 20),
-        hedgeLeverageMax: envNumber('PERPS_HEDGE_LEVERAGE_MAX', 15, 1, 20),
+        hedgeLeverageMax: envNumber('PERPS_HEDGE_LEVERAGE_MAX', 3, 1, 20),
+        maxNetExposurePct: envNumber('PERPS_MAX_NET_EXPOSURE_PCT', 0.35, 0, 1),
         hedgeTriggerPct: envNumber('PERPS_HEDGE_TRIGGER_PCT', 0.15, 0, 1),
         stopLossMarginPct: envNumber('PERPS_STOP_LOSS_MARGIN_PCT', 0.25, 0.01, 0.99),
         maxLossUsd: envNumber('PERPS_MAX_LOSS_USD', 75, 0, 1e9),
