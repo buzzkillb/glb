@@ -307,3 +307,49 @@ and the sleeve is funded from profit, which is far smaller than the book.
 profit-funded hedge can actually cover it, or (b) treat the sleeve as a
 *partial* risk-reducer and size it as such. Do not call it delta-neutral while
 `hedgeRatio < 1` and the budget is smaller than the delta.
+
+---
+
+## 12. Addendum — is it delta-neutral? (corrected for the new knobs)
+
+Section 11 measured the old defaults. Since then two changes materially shifted
+the answer, so re-measuring from the live book:
+
+- `hedgeRatio` now defaults to **1.0** (full intended offset, up from 0.8).
+- The hedge has its own leverage knob (`PERPS_HEDGE_LEVERAGE`, default **5**),
+  NOT capped by `maxLeverage`. Capping it at 2x made neutrality *arithmetically
+  unreachable* for a profit-sized sleeve, because the grid delta is ~$5.6k and
+  the eligible budget is ~$390.
+
+Live book (measured):
+
+```
+grid net-long delta      $5,646.51   (53.9% of $10,476.68 equity)
+eligible budget          $387.32
+target hedge notional    $5,646.51   (hedgeRatio 1.0)
+margin to full neutral   $1,129.30   (= delta / 5x)
+```
+
+**Verdict: still NOT delta-neutral today, and it cannot be** — because the
+margin required at 5x ($1,129) is ~3x the profit-funded budget ($387). The
+hedge is therefore a *partial* offset:
+
+```
+hedge notional if enabled  min($387 * 5, $5,646.51) = $1,936.60  (34% of delta)
+residual unhedged long     $3,709.91   (66% of the delta still long)
+```
+
+The hedge can never cover a delta larger than itself. The sleeve is
+profit-funded, and profit is ~$387 while the grid's accumulated net-long is
+~$5.6k. So the honest statements are:
+
+1. The hedge **logic** is now correct (it targets `ratio * delta` notional, and
+   can never over-hedge past neutral into a net-short).
+2. The **portfolio** is not neutral, and *cannot* be while the grid holds a
+   $5.6k delta against a $387 sleeve at any sane leverage. Either raise
+   `PERPS_HEDGE_LEVERAGE`, raise `maxEquityPct`, or — the real fix — **stop the
+   grid accumulating a delta ~14x the sleeve's capital.**
+
+The dashboard now says this plainly: `hedgeNeutral`, `targetHedgeNotionalUsd`,
+`marginToNeutralizeUsd`, `hedgeCoveragePct`. As of this writing `hedgeNeutral =
+false` and `hedgeCoveragePct = 0` (no position open, sleeve disabled).
