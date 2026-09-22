@@ -97,3 +97,55 @@ Extracted `borrowAccrualUsd()` as a named pure function; added tests proving lin
 ## 7. Conclusion
 
 Three audit passes have closed every High/Medium finding, with the restart-driven pass catching four defects a static read would have missed: a disabled sleeve reporting zeros, a permanently-cached zero-equity signal, an invisible mark, and a non-atomic write of the main state file. The sleeve now shows accurate live numbers while remaining disabled by default, deploys the entire eligible profit up to a 10% equity safety ceiling, and cannot touch spot base capital.
+
+---
+
+## 8. Follow-up audit (2026-09-21, later) — realized-PnL credit gap
+
+### The question: "realized PnL is $527.57, why only $154.51 deployed?"
+
+That was a **real bug**, not a policy choice. Root cause:
+
+- The equity archive only began **2026-09-20**, but the bot had already been
+  trading and banking profit before that date.
+- $313.50 of realized PnL was banked **before** the archive's first sample, so it
+  was already baked into that sample's equity value.
+- Using that raw first sample as the "profit baseline" **silently erased** every
+  dollar earned before the archive existed. Equity $10,557 − baseline $10,402.87
+  = $154.51, hiding $313.50 of genuinely earned money.
+
+### Fix
+
+Baseline is now **reconstructed to the true trading origin**:
+`tradingStartEquity = archiveOriginEquity − realizedBankedBeforeOrigin`.
+Live result after restart: baseline $10,089.36, eligible/budget **$477.22**
+(recomputed from the whole tape, including pre-archive fills). A regression test
+seeds exactly this scenario (pre-archive $300 + post $200) and asserts the full
+amount is credited and the baseline is reconstructed.
+
+### Also fixed in this pass
+
+- **Anti-double-deploy (High):** the live sizing path did not subtract margin
+  already committed, while the stored path did — a re-entry could over-deploy.
+  Both paths now subtract outstanding margin; invariant is test-enforced
+  (profit $X, margin $300 ⇒ deployable $X−300, floored at 0).
+- **Boot-time 0 equity guard:** `appendEquityArchive` now rejects non-positive
+  samples so a transient unsynced balance can never be archived as a fake crash
+  or chosen as the baseline.
+- **Dashboard floor display:** the tab showed `$0.00` floor while the copy claims
+  funding is gated above a floor. It now falls back to the dynamic baseline.
+
+### Verification
+
+- `tsc --noEmit` clean; `npm test` 124 tests, **122 pass, 0 fail, 2 skipped**.
+- Live acceptance after restart: `/api/perps` shows floor $10,089.36 =
+  baseline, budget $477.22, mark $119.20 live/healthy, dashboard consistent both
+  panels. Sleeve still DISABLED; nothing real traded.
+
+### Honest caveat on the number
+
+$477.22 is *eligible*, not automatically deployed. It is still capped by the
+10% equity guardrail (~$1,056, not binding here) and by liquid USDC. The
+remaining ~$50 difference from the $527.57 tape figure is the still-open grid
+inventory's unrealized PnL — realized *banked* cash that has since been rotated
+back into grid buys, which is not yet liquid enough to post as margin.
