@@ -237,3 +237,73 @@ below as out of scope for the perps work but visible on the dashboard.
    or fall back to a keyless OHLCV source. Doesn't affect the grid/DCA core.
 2. **Carry rate is still modeled**, not read from the venue's live rate.
 3. **`PERPS_ENABLED` unset** — sleeve remains inert by design.
+
+---
+
+## 10. Data feed: keyless replacement for the dead Birdeye source
+
+The meme strategy had exactly one real candle source — Birdeye's free tier — and
+its compute-unit quota is exhausted. Every refresh returned HTTP 400, so the
+strategy had **no price, no VWAP, and no admission signal**. A blind strategy
+never trades, which *looks* safe but is really just inert.
+
+**Geo/keys research and live test (keyless, no account):**
+
+| Source | Keyless? | OHLCV? | Verdict |
+|---|---|---|---|
+| Birdeye free | key, quota-limited | yes | **dead** — 400 every call |
+| Jupiter quote | keyless (lite) | no (spot only) | 400 on the grid oracle path too |
+| DexScreener | keyless | no candles (search/price only) | fallback price only |
+| **GeckoTerminal** | **keyless, no quota** | **real hourly OHLCV** | **PRIMARY — works** |
+
+**Implemented:** GeckoTerminal OHLCV is now the primary feed (real price, VWAP,
+high/low, volume), with Birdeye demoted to optional enrichment and a success
+check. Real pool liquidity + USD 24h volume still gate admission.
+
+**Live result:** CYB price 9.64e-6, VWAP 9.36e-6, pool liq $7,017, 24h vol $11.9
+→ `admitted=false` with the honest reason `vol $12 < min $100`. The strategy now
+makes a data-backed decision rather than sitting blind. (The pool is genuinely
+thin on volume even with real liquidity — that is a real market reading, not an
+error.)
+
+## 11. Is the perps setup delta-neutral? — NO, not with current defaults
+
+This is the direct answer, measured from the live book.
+
+The Tier-2 hedge is the first thing that runs once the sleeve is enabled, and its
+job is to neutralize the grid's accumulated net-long delta. It does **not** fully
+neutralize it, for two independent reasons:
+
+1. **`hedgeRatio = 0.8` deliberately leaves 20% unhedged** (it targets a partial
+   offset, not a full one).
+2. **The hedge is capped by eligible profit, not by the delta.** Margin is
+   `min(budget, delta*ratio/leverage)`. Live: grid net-long is **$5,660 (53.9%
+   of equity)** — the spot inventory is far larger than the sleeve's budget.
+
+Live math with defaults (hedgeRatio 0.8, lev 2, budget $401.75):
+
+```
+grid net-long delta     $5,660.12
+target hedge notional   $4,528.09   (0.8 x delta)
+margin needed at 2x     $2,264.05
+eligible budget         $401.75      <- the binding cap
+actual hedge notional   $803.50
+residual long           $4,856.62   (85.8% of the delta stays unhedged)
+```
+
+So the sleeve is a **partial, small hedge**, not delta-neutral. The earlier
+over-hedge bug is fixed (the hedge can no longer exceed the delta and flip the
+book net-short), but neutrality would require far more margin than the profit
+budget currently allows.
+
+**Honest framing:** to actually be delta-neutral you must match the notional to
+the delta. The knobs are: `hedgeRatio` → 1.0, a larger `maxEquityPct`, higher
+`maxLeverage`, or — most importantly — **stop letting the grid accumulate a
+$5,660 net-long**. The hedge cannot out-size the underlying book it is hedging,
+and the sleeve is funded from profit, which is far smaller than the book.
+
+**Recommendation:** if the goal is a genuinely neutral book, either
+(a) cap the grid's net-long accumulation at a fixed % of equity so a
+profit-funded hedge can actually cover it, or (b) treat the sleeve as a
+*partial* risk-reducer and size it as such. Do not call it delta-neutral while
+`hedgeRatio < 1` and the budget is smaller than the delta.
