@@ -529,10 +529,6 @@ export class PerpSleeve {
     const equity = this.equityUsd();
     const mark = this.feed.lastPrice();
     const gridLong = mark > 0 ? this.gridNetLongUsd(mark) : 0;
-    // Leverage the hedge would actually use — its own knob, deliberately not
-    // capped by maxLeverage (which caps the directional overlay). Used only to
-    // report the margin that full neutrality would require.
-    const hedgeLev = Math.max(1, p.hedgeLeverage ?? 5);
     const eligible = Math.max(0, equity - led.principalFloorUsd);
     // Deployable budget comes from the LIVE profit signal, not a stored floor,
     // net of margin already at work so the displayed number matches what can
@@ -550,6 +546,22 @@ export class PerpSleeve {
           led.outstandingMarginUsd
         )
       : 0;
+    // Leverage the hedge WOULD use right now, mirroring the auto-scaling in
+    // decideSleeveAction: the smallest leverage that lets the deployable budget
+    // reach the target notional, bounded by the configured floor/ceiling. Used
+    // only to report the margin full neutrality would require, so the dashboard
+    // matches what the controller would actually do.
+    const minLev = Math.max(1, p.hedgeLeverage ?? 1);
+    const maxLev = Math.max(minLev, p.hedgeLeverageMax ?? minLev);
+    const hedgeLev = Math.max(
+      minLev,
+      Math.min(
+        maxLev,
+        gridLong > 0 && budget > 0
+          ? (gridLong * Math.max(0, Math.min(1, p.hedgeRatio))) / budget
+          : minLev
+      )
+    );
     const pos = led.position;
     const liquidationBufferPct =
       pos && mark > 0

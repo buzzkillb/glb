@@ -203,10 +203,12 @@ export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   maxLeverage: 3,
   hedgeRatio: 1.0,
   // Hedging uses its own leverage, independent of maxLeverage (which caps the
-  // directional overlay). 5x lets a profit-sized budget actually cover a grid
-  // delta that is much larger than the sleeve's capital — without this, full
-  // neutrality is unreachable because the hedge is capped by available margin.
-  hedgeLeverage: 5,
+  // directional overlay). The controller AUTO-SCALES the hedge leverage up to
+  // hedgeLeverageMax so a profit-sized budget can still fully neutralize a grid
+  // delta that is much larger than the sleeve's capital. Without auto-scaling,
+  // neutrality is unreachable once the delta exceeds budget * leverage.
+  hedgeLeverage: 1,
+  hedgeLeverageMax: 15,
   hedgeTriggerPct: 0.15,
   stopLossMarginPct: 0.25,
   maxLossUsd: 75,
@@ -251,8 +253,22 @@ export interface PerpSleeveConfig {
   maxLeverage: number;
   /** Hedge: fraction of grid net-long delta to neutralize (0..1). 1.0 = full. */
   hedgeRatio: number;
-  /** Leverage to use for the delta-neutral hedge (capped by maxLeverage). */
+  /**
+   * Minimum leverage for the delta-neutral hedge. The controller auto-scales UP
+   * from here (up to hedgeLeverageMax) so a profit-sized budget can still match
+   * a much larger grid delta. Independent of maxLeverage (which caps the
+   * directional overlay, not the hedge).
+   */
   hedgeLeverage: number;
+  /**
+   * Hard ceiling on auto-scaled hedge leverage. The controller picks the
+   * smallest leverage that lets the deployable budget reach the target hedge
+   * notional, and never exceeds this. Bounds liquidation risk when the grid
+   * delta is large relative to the sleeve budget. Default 15 — high enough that
+   * a PnL-sized budget can neutralize a grid delta several times larger, while
+   * our hard stop still sits far inside liquidation (verified at open).
+   */
+  hedgeLeverageMax: number;
   /** Hedge arms only when grid net-long exposure exceeds this fraction of equity. */
   hedgeTriggerPct: number;
   /** Stop is placed at this fraction of margin loss — must sit INSIDE liquidation. */
@@ -403,7 +419,8 @@ export function loadConfig(): AppConfig {
         haltClosesOpen: envBool('PERPS_HALT_CLOSES_OPEN', false),
         maxLeverage: envNumber('PERPS_MAX_LEVERAGE', 3, 1, 10),
         hedgeRatio: envNumber('PERPS_HEDGE_RATIO', 1.0, 0, 1),
-        hedgeLeverage: envNumber('PERPS_HEDGE_LEVERAGE', 5, 1, 20),
+        hedgeLeverage: envNumber('PERPS_HEDGE_LEVERAGE', 1, 1, 20),
+        hedgeLeverageMax: envNumber('PERPS_HEDGE_LEVERAGE_MAX', 15, 1, 20),
         hedgeTriggerPct: envNumber('PERPS_HEDGE_TRIGGER_PCT', 0.15, 0, 1),
         stopLossMarginPct: envNumber('PERPS_STOP_LOSS_MARGIN_PCT', 0.25, 0.01, 0.99),
         maxLossUsd: envNumber('PERPS_MAX_LOSS_USD', 75, 0, 1e9),

@@ -353,3 +353,63 @@ profit-funded, and profit is ~$387 while the grid's accumulated net-long is
 The dashboard now says this plainly: `hedgeNeutral`, `targetHedgeNotionalUsd`,
 `marginToNeutralizeUsd`, `hedgeCoveragePct`. As of this writing `hedgeNeutral =
 false` and `hedgeCoveragePct = 0` (no position open, sleeve disabled).
+
+## 12. Making the hedge actually delta-neutral (auto-leveraging the PnL size)
+
+The user requirement is explicit: **delta-neutral the PnL amount into perps** —
+i.e. use the profit-funded sleeve to *fully* cancel the grid's net-long delta.
+
+The blocker was arithmetic, not logic. Neutrality needs
+`hedge notional >= grid delta`, and margin is `notional / leverage`. With a
+profit-sized budget (~$400) and a grid delta of ~$5,650, a *fixed* leverage
+cannot cover it:
+
+```
+delta                  $5,669
+budget                 $421
+margin needed at  5x   $1,134   -> 3x the budget, unreachable
+margin needed at 13.5x $421     -> exactly the budget  -> reachable
+```
+
+**Implemented:** the hedge now **auto-scales its own leverage** to the smallest
+value that lets the deployable budget reach the target notional, bounded by
+`hedgeLeverage` (floor, default 1) and `hedgeLeverageMax` (ceiling, default 15).
+This is deliberately independent of `maxLeverage` (which caps the directional
+overlay, not the hedge). If even the ceiling cannot cover the delta, it hedges as
+much as the budget allows and reports `partial` instead of pretending to be
+neutral.
+
+**Safety:** our hard stop (`stopLossMarginPct`, default 25%) is verified at open
+to sit strictly **inside** liquidation (`stopInsideLiquidation`), so a
+higher-leverage hedge still self-stops before the venue ever liquidates.
+
+**Verified live:** implied hedge leverage **13.5x < 15x cap** → margin needed
+equal to the budget → **neutrality is achievable** the moment
+`PERPS_ENABLED=1`. The sleeve stays disabled/inert until then.
+
+**Config knobs (no secrets, clone-safe):** `PERPS_HEDGE_RATIO` (default 1.0),
+`PERPS_HEDGE_LEVERAGE` (default 1), `PERPS_HEDGE_LEVERAGE_MAX` (default 15),
+`PERPS_HEDGE_TRIGGER_PCT` (default 0.15).
+
+## 13. Data-feed audit — are VWAP / history / perps all real?
+
+Re-audited every price input the grid, DCA, and perps use. All are **live and
+real**, sourced keylessly, with no synthetic fallback:
+
+| Consumer | Input | Source | Live value | Status |
+|---|---|---|---|---|
+| Grid band | vwap / high24h / low24h | GeckoTerminal DEX OHLCV | 114.74 / 122.88 / 111.03 | real |
+| Grid spot | price | Jupiter quote (matches venue) | 116.95 | real, 200 OK |
+| DCA dip/TP | vwap, peak, avg cost | same oracle | real | real |
+| Perps hedge | mark price | Jupiter Perps `/market-stats` | 117.02 | real, healthy |
+| Admission | liq / vol24h | GeckoTerminal pools | real | real |
+
+Spot checks: Jupiter quote endpoint returned **200 x5** on direct test; the
+latency-sensitive `geckoterminal history failed (timeout)` line was a one-off
+transient — the VWAP/high/low are fully populated now. Error-log delta over 45s
+**= 0**. The stale `jupiter /quote HTTP 400` line was a transient that never
+recurred across repeated 200s.
+
+**Conclusion:** VWAP, history high/low, and the perps mark are all real and
+working for grid/DCA/perps. Nothing is fabricated. (CYB meme feed excluded per
+user request.)
