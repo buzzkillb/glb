@@ -538,6 +538,11 @@ export class PerpSleeve {
    */
   spotClaimUsd(): number {
     const v = this.view();
+    // When the sleeve is OFF it is deploying nothing, so it claims nothing and
+    // spot sizing is unchanged. `view()` deliberately still computes a budget
+    // for the dashboard while disabled, so gate on `enabled` here, not on the
+    // budget being 0.
+    if (!v.enabled) return 0;
     return Math.max(0, v.outstandingMarginUsd + v.sleeveBudgetUsd);
   }
 
