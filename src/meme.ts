@@ -50,6 +50,8 @@ export class MemeStrategy {
   private admitted = false;
   private admissionReason = 'pending data';
   private timer?: ReturnType<typeof setInterval>;
+  /** Last warning text, so identical repeats are suppressed (see warn()). */
+  private lastWarn = '';
 
   constructor(
     private cfg: AppConfig,
@@ -105,35 +107,90 @@ export class MemeStrategy {
    * (which drives admission) from populating.
    */
   async refresh(): Promise<void> {
-    // 1) BirdEye OHLCV — PRIMARY real source for price + VWAP + high/low + 24h
-    //    volume. Rate-limited (free tier), so we pace it and only fetch candles
-    //    at the cadence below; the engine also ticks between refreshes using the
-    //    last real candles. Never fabricated.
-    let birdeyeOk = false;
+    // 1) GeckoTerminal OHLCV — KEYLESS PRIMARY real source for price + VWAP +
+    //    high/low + candle volume. This is the workhorse feed: it needs no API
+    //    key and no quota, so the strategy is never blind when BirdEye's free
+    //    tier is exhausted. Never fabricated.
+    let ohlcvOk = false;
     try {
-      birdeyeOk = await this.fetchBirdeyeOhlcv();
+      ohlcvOk = await this.fetchGeckoOhlcv();
     } catch (e) {
-      this.warn(`birdeye ohlcv refresh failed (${(e as Error).message})`);
+      this.warn(`gecko ohlcv refresh failed (${(e as Error).message})`);
     }
-    // 2) GeckoTerminal token->pools — keyless FALLBACK only, to keep liquidity /
-    //    24h-volume alive if BirdEye is throttled. It does NOT feed VWAP.
+    // 2) BirdEye OHLCV — OPTIONAL richer source, used only when a key is set and
+    //    it succeeds. Its candles (real vUsd) supersede the keyless feed. A
+    //    quota/401 here is non-fatal because GeckoTerminal already populated the
+    //    real price/VWAP above.
+    if (!ohlcvOk && this.cfg.birdeyeApiKey) {
+      try {
+        const birdOk = await this.fetchBirdeyeOhlcv();
+        if (birdOk) ohlcvOk = true;
+      } catch (e) {
+        this.warn(`birdeye ohlcv refresh failed (${(e as Error).message})`);
+      }
+    }
+    // 3) GeckoTerminal token->pools — keyless source for REAL liquidity + 24h
+    //    USD volume, which drive the admission gate. OHLCV volume alone cannot
+    //    gate a thin graduated pool.
     try {
       await this.fetchGeckoLiquidity();
     } catch (e) {
-      this.warn(`gecko liquidity fallback failed (${(e as Error).message})`);
+      this.warn(`gecko liquidity refresh failed (${(e as Error).message})`);
     }
-    // If BirdEye is unavailable AND we never had real candles, surface 24h
-    // volume from Gecko as a fallback so admission can still judge liquidity.
-    if (!birdeyeOk && this.birdeyeVolumeUsd <= 0) {
+    // Prefer the USD-quoted pool volume for the admission gate; fall back to
+    // summed candle volume only when the pools endpoint gave nothing.
+    if (this.geckoVolumeUsd > 0) {
       this.vol24hUsd = this.geckoVolumeUsd;
+    } else if (!ohlcvOk && this.birdeyeVolumeUsd > 0) {
+      this.vol24hUsd = this.birdeyeVolumeUsd;
     }
     this.evaluateAdmission();
     this.tick(); // recompute decisions with the freshest real data
   }
 
+  /**
+   * KEYLESS real OHLCV from GeckoTerminal. Returns true when real candles were
+   * loaded. The slot's `pool` is stored as `solana_<addr>` (the id Gecko returns
+   * on the pools endpoint) but the OHLCV path takes the BARE address, so we
+   * strip the network prefix before requesting.
+   */
+  private async fetchGeckoOhlcv(): Promise<boolean> {
+    const raw = this.slot.pool || '';
+    const poolAddr = raw.includes('_') ? raw.slice(raw.indexOf('_') + 1) : raw;
+    if (!poolAddr) return false;
+    const limit = Math.max(24, Math.min(1000, Math.round(this.slot.historyHours)));
+    const res = await fetch(
+      `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddr}/ohlcv/hour?aggregate=1&limit=${limit}`,
+      { signal: AbortSignal.timeout(15000), headers: { Accept: 'application/json' } }
+    );
+    if (!res.ok) throw new Error(`gecko ohlcv HTTP ${res.status}`);
+    const json = (await res.json()) as {
+      data?: { attributes?: { ohlcv_list?: number[][] } };
+    };
+    const rows = json?.data?.attributes?.ohlcv_list ?? [];
+    const candles: Candle[] = rows
+      .filter((r) => Array.isArray(r) && r.length >= 6)
+      .map((r) => ({
+        ts: r[0] * 1000,
+        open: r[1],
+        high: r[2],
+        low: r[3],
+        close: r[4],
+        volumeUsd: r[5] ?? 0,
+      }))
+      .filter((c) => Number.isFinite(c.close) && c.close > 0)
+      .sort((a, b) => a.ts - b.ts);
+    if (candles.length === 0) return false;
+    this.candles = candles;
+    // Live price = most recent real candle close (never fabricated).
+    this.price = candles[candles.length - 1].close;
+    return true;
+  }
+
   private async fetchBirdeyeOhlcv(): Promise<boolean> {
     if (!this.cfg.birdeyeApiKey) {
-      this.warn('BIRDEYE_API_KEY not set — cannot fetch real candles/VWAP');
+      // Not a problem any more: GeckoTerminal is the keyless primary feed. Only
+      // note it once, at low priority.
       return false;
     }
     // Free tier: fetch at most once per refresh gap. ~30 hourly candles give a
@@ -599,7 +656,15 @@ export class MemeStrategy {
     this.store.recordTrade(t);
   }
 
+  /**
+   * Log a warning, but suppress immediate repetition. A quota/rate-limit error
+   * (e.g. Birdeye compute-unit limit) will otherwise repeat identically every
+   * refresh cycle and drown out real signal in the log. Only the first
+   * occurrence of a given message is printed; a changed message logs again.
+   */
   private warn(msg: string): void {
+    if (msg === this.lastWarn) return;
+    this.lastWarn = msg;
     console.warn(`[${this.slot.id}] ${msg}`);
   }
 }
