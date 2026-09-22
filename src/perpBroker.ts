@@ -177,7 +177,11 @@ export class PerpBroker {
       serializedTxBase64: raw.serializedTxBase64,
     };
 
-    await this.maybeSend(quote.serializedTxBase64, params.signer);
+    const send = await this.maybeSend(quote.serializedTxBase64, params.signer);
+    // Only a genuine LIVE send failure invalidates the open. Dry-run / paper
+    // intentionally skip the send, so `sent:false` without an error is fine —
+    // the built quote is still booked so the dashboard shows a live position.
+    if (send.error) return { ok: false, error: send.error };
     return { ok: true, quote };
   }
 
@@ -185,27 +189,42 @@ export class PerpBroker {
   async close(params: {
     asset: string;
     side: 'long' | 'short';
+    collateralUsd: number;
     notionalUsd: number;
+    positionPubkey: string;
     walletAddress: string;
     signer?: Keypair;
   }): Promise<PerpCloseResult> {
     const mint = PERP_MARKETS[params.asset];
     if (!mint) return { ok: false, error: `unknown perp asset ${params.asset}` };
+    if (!params.positionPubkey) {
+      return { ok: false, error: 'missing positionPubkey: cannot build a decrease' };
+    }
 
+    // NOTE: `/positions/decrease` uses a DIFFERENT schema from `increase`.
+    // It requires `collateralUsdDelta`, `sizeUsdDelta`, `desiredMint`, and
+    // `positionPubkey` — sending the increase-style `collateralTokenDelta`/`side`
+    // payload is rejected with `invalid_argument`. A full close withdraws the
+    // whole collateral and reduces the whole notional size to zero.
     const raw = await this.post('/positions/decrease', {
+      collateralUsdDelta: usdToRaw(params.collateralUsd),
+      sizeUsdDelta: usdToRaw(params.notionalUsd),
+      desiredMint: USDC_MINT,
+      positionPubkey: params.positionPubkey,
       collateralMint: USDC_MINT,
       marketMint: mint,
-      inputMint: USDC_MINT,
-      collateralTokenDelta: usdToRaw(params.notionalUsd),
-      side: params.side,
-      maxSlippageBps: String(Math.max(1, Math.round(this.opts.slippageBps))),
       walletAddress: params.walletAddress,
+      maxSlippageBps: String(Math.max(1, Math.round(this.opts.slippageBps))),
     });
 
     if (raw.code) return { ok: false, error: `${raw.code}: ${raw.message}` };
 
     const q = raw.quote ?? {};
-    await this.maybeSend(raw.serializedTxBase64, params.signer);
+    const send = await this.maybeSend(raw.serializedTxBase64, params.signer);
+    // A live close that fails to submit must NOT be treated as closed, or the
+    // ledger would drop a position that still exists on-chain.
+    if (send.error) return { ok: false, error: send.error };
+
     return {
       ok: true,
       pnlUsd: Number.isFinite(Number(q.realizedPnlUsd)) ? Number(q.realizedPnlUsd) : undefined,
@@ -227,12 +246,14 @@ export class PerpBroker {
   }
 
   /** Sign + submit a serialized tx, honoring the kill-switch/dry-run guards. */
-  private async maybeSend(serializedTxBase64: string | undefined, signer?: Keypair): Promise<void> {
-    if (!serializedTxBase64) return;
-    if (this.skipSend()) return;
+  private async maybeSend(
+    serializedTxBase64: string | undefined,
+    signer?: Keypair
+  ): Promise<{ sent: boolean; error?: string }> {
+    if (!serializedTxBase64) return { sent: false };
+    if (this.skipSend()) return { sent: false };
     if (!signer) {
-      console.warn('[perps] no signer — cannot send; position built but NOT submitted');
-      return;
+      return { sent: false, error: 'no signer — position built but NOT submitted' };
     }
     try {
       const tx = VersionedTransaction.deserialize(Buffer.from(serializedTxBase64, 'base64'));
@@ -242,8 +263,12 @@ export class PerpBroker {
         maxRetries: 3,
       });
       await this.conn.confirmTransaction(sig, 'confirmed');
+      return { sent: true };
     } catch (e) {
-      console.warn(`[perps] send failed: ${(e as Error).message}`);
+      // Return the failure instead of swallowing it: a live submission that
+      // fails must NOT be booked as an open position, or the sleeve would
+      // believe it is hedged while nothing exists on-chain.
+      return { sent: false, error: `send failed: ${(e as Error).message}` };
     }
   }
 }

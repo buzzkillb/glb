@@ -73,8 +73,32 @@ export class PerpSleeve {
   }
 
   private equityUsd(): number {
-    // Reuse the store's own chain-vs-books equity calc (spot book only).
-    return this.store.audit().equityUsd;
+    // Reuse the store's own chain-vs-books equity calc (spot book only), then
+    // add back the sleeve's own open-position equity. Posting margin moves USDC
+    // out of the wallet into the venue's position account, so the raw wallet
+    // equity dips by the margin amount even though the position still holds
+    // equivalent value. Without this add-back the profit signal would collapse
+    // by exactly the margin just deployed — a self-cancelling budget.
+    return this.store.audit().equityUsd + this.perpPositionEquityUsd(this.feed.lastPrice());
+  }
+
+  /**
+   * Mark-to-market equity of the open perp position: collateral plus unrealized
+   * PnL minus accrued carry, floored at 0. Returns 0 when flat. Pure and
+   * synchronous so it is safe to call from the dashboard view path.
+   */
+  private perpPositionEquityUsd(mark: number): number {
+    const pos = this.ledger.snapshotLedger().position;
+    if (!pos) return 0;
+    const p = this.cfg.strategies.perps ?? DEFAULT_PERPS_CONFIG;
+    const notional = pos.collateralUsd * pos.leverage;
+    const dir = pos.side === 'short' ? 1 : -1;
+    const moveFrac =
+      pos.entryPriceUsd > 0 && mark > 0 ? (mark - pos.entryPriceUsd) / pos.entryPriceUsd : 0;
+    const pnl = dir * moveFrac * notional;
+    const hoursHeld = Math.max(0, (Date.now() - pos.openedAt) / 3_600_000);
+    const carry = borrowAccrualUsd(notional, p.hourlyBorrowPct, hoursHeld);
+    return Math.max(0, pos.collateralUsd + pnl - carry);
   }
 
   /**
@@ -87,9 +111,14 @@ export class PerpSleeve {
   private refreshProfit(): ProfitSignal | null {
     const p = this.cfg.strategies.perps ?? DEFAULT_PERPS_CONFIG;
     const audit = this.store.audit();
+    // Only liquid wallet USDC can be posted as margin, so free cash stays the
+    // wallet balance — margin already committed is genuinely gone from here.
     const freeCashUsd = audit.chainUsdc ?? 0;
     try {
-      this.profit = detectProfit(this.cfg.mode, audit.equityUsd, freeCashUsd, {
+      // equityUsd() adds the open position's mark-to-market value back, keeping
+      // true net worth stable across an open/close so the budget is not
+      // self-cancelling (see equityUsd()).
+      this.profit = detectProfit(this.cfg.mode, this.equityUsd(), freeCashUsd, {
         windowHours: p.profitWindowHours,
         minFillsForConfidence: p.minFillsForConfidence,
       });
@@ -176,7 +205,9 @@ export class PerpSleeve {
           await this.broker.close({
             asset: this.cfg.strategies.grid.baseAsset,
             side: held.side,
+            collateralUsd: held.collateralUsd,
             notionalUsd: notional,
+            positionPubkey: held.positionPubkey ?? '',
             walletAddress: this.walletAddr(),
             signer: this.signer,
           });
@@ -277,7 +308,9 @@ export class PerpSleeve {
       await this.broker.close({
         asset: this.cfg.strategies.grid.baseAsset,
         side: pos.side,
+        collateralUsd: pos.collateralUsd,
         notionalUsd: notional,
+        positionPubkey: pos.positionPubkey ?? '',
         walletAddress: this.walletAddr(),
         signer: this.signer,
       });
@@ -305,7 +338,9 @@ export class PerpSleeve {
         await this.broker.close({
           asset: this.cfg.strategies.grid.baseAsset,
           side: pos.side,
+          collateralUsd: pos.collateralUsd,
           notionalUsd: notional,
+          positionPubkey: pos.positionPubkey ?? '',
           walletAddress: this.walletAddr(),
           signer: this.signer,
         });

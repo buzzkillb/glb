@@ -264,3 +264,32 @@ test('mark feed commits only prints that pass the anomaly gate', async () => {
     assert.ok(Math.abs(glitch.price - m1!.price) / m1!.price <= 0.15, 'committed print must be within the jump gate');
   }
 });
+
+test('computeSleeveBudget: maxMarginUsd=0 means uncapped, not a $0 ceiling', () => {
+  // The fallback sizing path must agree with deployableSleeveUsd: 0 is "no USD
+  // ceiling", bounded by the equity cap — not a literal zero-dollar budget.
+  const c = cfg({ enabled: true, maxMarginUsd: 0, profitSharePct: 1, maxEquityPct: 0.1 });
+  const b = computeSleeveBudget(c, inputs({ equityUsd: 10_500, ledger: ledger({ principalFloorUsd: 10_000 }) }));
+  assert.ok(b > 0, 'budget must not collapse to 0 when maxMarginUsd is 0');
+  // eligible profit $500, equity cap $1,050 -> the profit term binds.
+  assert.ok(Math.abs(b - 500) < 1e-9, `expected 500, got ${b}`);
+});
+
+test('hedge sizes margin as notional/leverage — never over-hedges past neutral', () => {
+  // With hedgeRatio 0.8 the hedge NOTIONAL must be 0.8x the grid delta, so the
+  // MARGIN is 0.8*delta/lev. Sizing the ratio directly as margin would leverage
+  // it into 1.6x the delta and flip the book net-short.
+  const c = cfg({ enabled: true, profitSharePct: 1, maxEquityPct: 0.5, hedgeRatio: 0.8, hedgeTriggerPct: 0.15, maxLeverage: 3 });
+  const gridDelta = 2_000; // 20% of equity -> above the 15% trigger
+  const d = decideSleeveAction(c, inputs({
+    equityUsd: 10_500,
+    ledger: ledger({ principalFloorUsd: 10_000 }),
+    gridNetLongUsd: gridDelta,
+    deployableMarginUsd: 10_000,
+  }));
+  assert.equal(d.intent, 'hedge');
+  const lev = Math.min(c.maxLeverage, 2);
+  const hedgeNotional = d.marginUsd * lev;
+  assert.ok(Math.abs(hedgeNotional - gridDelta * 0.8) < 1e-6, `hedge notional ${hedgeNotional} must equal 0.8*delta`);
+  assert.ok(hedgeNotional < gridDelta, 'hedge must not exceed the delta (would become net-short)');
+});

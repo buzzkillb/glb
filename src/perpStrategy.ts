@@ -104,8 +104,11 @@ export function computeSleeveBudget(cfg: PerpSleeveConfig, inputs: SleeveInputs)
   // Subtract margin already at work so the same profit cannot be deployed twice.
   const available = Math.max(0, share - Math.max(0, inputs.ledger.outstandingMarginUsd));
   const equityCap = Math.max(0, inputs.equityUsd) * clamp(cfg.maxEquityPct, 0, 1);
-  const budget = Math.min(available, equityCap, Math.max(0, cfg.maxMarginUsd));
-  return budget > 0 ? budget : 0;
+  // maxMarginUsd <= 0 means "no explicit USD ceiling" — fall back to the equity
+  // cap. Treating 0 as a literal $0 ceiling would silently zero the whole budget.
+  const usdCeiling = cfg.maxMarginUsd > 0 ? cfg.maxMarginUsd : Number.POSITIVE_INFINITY;
+  const budget = Math.min(available, equityCap, usdCeiling);
+  return budget > 0 && Number.isFinite(budget) ? budget : 0;
 }
 
 /**
@@ -148,17 +151,23 @@ export function decideSleeveAction(
   // Tier 2: neutralize the grid's accumulated net-long delta.
   const exposurePct = inputs.equityUsd > 0 ? inputs.gridNetLongUsd / inputs.equityUsd : 0;
   if (exposurePct >= cfg.hedgeTriggerPct && inputs.gridNetLongUsd > 0) {
-    const wantMargin = Math.min(budget, inputs.gridNetLongUsd * cfg.hedgeRatio);
+    // hedgeRatio is a NOTIONAL fraction of the delta to offset, so the required
+    // MARGIN is (targetNotional / leverage). Applying the ratio directly as
+    // margin and then leveraging it would over-hedge by a factor of the
+    // leverage (e.g. 0.8*2 = 1.6x the delta → net-short instead of neutral).
+    const lev = Math.min(cfg.maxLeverage, 2);
+    const targetNotional = inputs.gridNetLongUsd * clamp(cfg.hedgeRatio, 0, 1);
+    const wantMargin = Math.min(budget, targetNotional / lev);
     if (wantMargin >= PERP_MIN_COLLATERAL_USD) {
       return {
         marginUsd: wantMargin,
-        lev: Math.min(cfg.maxLeverage, 2),
+        lev,
         side: 'short',
         intent: 'hedge',
         reason: `hedge grid net-long ${inputs.gridNetLongUsd.toFixed(0)}USD (${(exposurePct * 100).toFixed(1)}% equity)`,
       };
     }
-    return idle(`hedge wanted $${wantMargin.toFixed(2)} < venue minimum`);
+    return idle(`hedge wanted ${wantMargin.toFixed(2)} < venue minimum`);
   }
 
   // Tier 3: small directional overlay.
