@@ -28,6 +28,17 @@ import type { PerpPosition } from './perpStore.js';
 
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const USDC_DECIMALS = 6;
+const SOL_DECIMALS = 9;
+
+/**
+ * Venue-enforced floors, VERIFIED LIVE (2026-09-21):
+ *   - leverage < 1.1 is rejected (`invalid_leverage`, incl. exactly 1x)
+ *   - a LONG position must post the MARKET TOKEN as collateral
+ *     (`invalid_collateral_token` when posting USDC for a long)
+ * These are external venue facts, not policy choices, so they live with the
+ * broker rather than as tunable config.
+ */
+export const PERP_MIN_LEVERAGE = 1.1;
 
 /** Venue-enforced floor for opening a new position (USD). */
 export const PERP_MIN_COLLATERAL_USD = 10;
@@ -72,12 +83,20 @@ interface RawBuild {
   positionPubkey?: string;
   serializedTxBase64?: string;
   quote?: Record<string, string> | null;
+  /** Returned by /transaction/execute when the keeper lands the tx. */
+  txid?: string;
+  signature?: string;
   code?: string;
   message?: string;
 }
 
 function usdToRaw(usd: number, decimals = USDC_DECIMALS): string {
   return String(Math.round(usd * 10 ** decimals));
+}
+
+/** Decimal places for a mint, for converting a USD size into raw base units. */
+function mintDecimals(mint: string): number {
+  return mint === USDC_MINT ? USDC_DECIMALS : SOL_DECIMALS;
 }
 
 export class PerpBroker {
@@ -142,11 +161,34 @@ export class PerpBroker {
       };
     }
 
+    // SAFETY: leverage must clear the venue's enforced floor, or the build is
+    // rejected outright. Surface it here rather than spending a failed request.
+    if (params.leverage < PERP_MIN_LEVERAGE) {
+      return {
+        ok: false,
+        error: `leverage ${params.leverage.toFixed(2)}x < venue minimum ${PERP_MIN_LEVERAGE}x`,
+      };
+    }
+
+    // Collateral rules are SIDE-DEPENDENT at this venue: a SHORT posts USDC
+    // (quote) as margin, while a LONG must post the MARKET TOKEN itself. Posting
+    // the wrong one is rejected (`invalid_collateral_token`), so pick the mint
+    // and convert the USD size into that token's raw base units.
+    const collateralMint = params.side === 'long' ? mint : USDC_MINT;
+    let collateralRaw: string;
+    if (params.side === 'long') {
+      const mark = await this.markPrice(mint);
+      if (!(mark > 0)) return { ok: false, error: 'no mark price to size long collateral' };
+      collateralRaw = usdToRaw(params.collateralUsd / mark, mintDecimals(mint));
+    } else {
+      collateralRaw = usdToRaw(params.collateralUsd);
+    }
+
     const raw = await this.post('/positions/increase', {
-      collateralMint: USDC_MINT,
+      collateralMint,
       marketMint: mint,
-      inputMint: USDC_MINT,
-      collateralTokenDelta: usdToRaw(params.collateralUsd),
+      inputMint: collateralMint,
+      collateralTokenDelta: collateralRaw,
       leverage: String(params.leverage),
       side: params.side,
       maxSlippageBps: String(Math.max(1, Math.round(this.opts.slippageBps))),
@@ -177,7 +219,7 @@ export class PerpBroker {
       serializedTxBase64: raw.serializedTxBase64,
     };
 
-    const send = await this.maybeSend(quote.serializedTxBase64, params.signer);
+    const send = await this.maybeSend(quote.serializedTxBase64, params.signer, 'increase-position');
     // Only a genuine LIVE send failure invalidates the open. Dry-run / paper
     // intentionally skip the send, so `sent:false` without an error is fine —
     // the built quote is still booked so the dashboard shows a live position.
@@ -211,16 +253,16 @@ export class PerpBroker {
       sizeUsdDelta: usdToRaw(params.notionalUsd),
       desiredMint: USDC_MINT,
       positionPubkey: params.positionPubkey,
-      collateralMint: USDC_MINT,
-      marketMint: mint,
-      walletAddress: params.walletAddress,
+      // A hedge unwind should exit the WHOLE position, not leave a stub behind.
+      // The venue honors `entirePosition` alongside the deltas.
+      entirePosition: true,
       maxSlippageBps: String(Math.max(1, Math.round(this.opts.slippageBps))),
     });
 
     if (raw.code) return { ok: false, error: `${raw.code}: ${raw.message}` };
 
     const q = raw.quote ?? {};
-    const send = await this.maybeSend(raw.serializedTxBase64, params.signer);
+    const send = await this.maybeSend(raw.serializedTxBase64, params.signer, 'decrease-position');
     // A live close that fails to submit must NOT be treated as closed, or the
     // ledger would drop a position that still exists on-chain.
     if (send.error) return { ok: false, error: send.error };
@@ -248,7 +290,8 @@ export class PerpBroker {
   /** Sign + submit a serialized tx, honoring the kill-switch/dry-run guards. */
   private async maybeSend(
     serializedTxBase64: string | undefined,
-    signer?: Keypair
+    signer: Keypair | undefined,
+    action: 'increase-position' | 'decrease-position'
   ): Promise<{ sent: boolean; error?: string }> {
     if (!serializedTxBase64) return { sent: false };
     if (this.skipSend()) return { sent: false };
@@ -256,19 +299,73 @@ export class PerpBroker {
       return { sent: false, error: 'no signer — position built but NOT submitted' };
     }
     try {
+      // Jupiter Perps requires the KEEPER to co-sign and land the tx
+      // (`requireKeeperSignature:true` on the build reply). Submitting directly
+      // to the RPC fails signature/landing, so the correct flow is: sign the
+      // user's side here, then POST the signed bytes to /transaction/execute,
+      // which returns the real on-chain txid. Verified live 2026-09-21.
       const tx = VersionedTransaction.deserialize(Buffer.from(serializedTxBase64, 'base64'));
       tx.sign([signer]);
-      const sig = await this.conn.sendTransaction(tx, {
-        skipPreflight: false,
-        maxRetries: 3,
+      const signedB64 = Buffer.from(tx.serialize()).toString('base64');
+      const exec = await this.postTx('/transaction/execute', {
+        action,
+        serializedTxBase64: signedB64,
       });
-      await this.conn.confirmTransaction(sig, 'confirmed');
+      if (exec.code) return { sent: false, error: `keeper execute failed: ${exec.code}: ${exec.message}` };
+      const txid = exec.txid || exec.signature;
+      if (!txid) return { sent: false, error: 'keeper returned no txid' };
+      // Confirm the keeper-landed tx so we never book a position that did not
+      // actually open (or close).
+      const err = await this.confirmTx(txid);
+      if (err) return { sent: false, error: `tx did not confirm: ${err}` };
       return { sent: true };
     } catch (e) {
       // Return the failure instead of swallowing it: a live submission that
       // fails must NOT be booked as an open position, or the sleeve would
       // believe it is hedged while nothing exists on-chain.
       return { sent: false, error: `send failed: ${(e as Error).message}` };
+    }
+  }
+
+  /** Poll a keeper-landed txid until confirmed; returns an error string or null. */
+  private async confirmTx(txid: string): Promise<string | null> {
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      const st = await this.conn.getSignatureStatuses([txid], { searchTransactionHistory: true });
+      const s = st.value[0];
+      if (s && (s.confirmationStatus === 'confirmed' || s.confirmationStatus === 'finalized')) {
+        return s.err ? JSON.stringify(s.err) : null;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    return `not confirmed in 60s (${txid})`;
+  }
+
+  /** GET the venue mark price for a mint (used to size long-side collateral). */
+  private async markPrice(mint: string): Promise<number> {
+    try {
+      const url = `${this.opts.apiUrl.replace(/\/$/, '')}/market-stats?mint=${mint}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+      const d = (await res.json()) as { price?: string | number };
+      return Number(d.price) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** POST expecting a tx-execution reply (txid/signature) rather than a quote. */
+  private async postTx(pathname: string, body: Record<string, unknown>): Promise<RawBuild> {
+    const url = `${this.opts.apiUrl.replace(/\/$/, '')}${pathname}`;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(25_000),
+      });
+      return (await res.json()) as RawBuild;
+    } catch {
+      return {};
     }
   }
 }

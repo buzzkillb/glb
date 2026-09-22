@@ -1,4 +1,4 @@
-import { PERP_MIN_COLLATERAL_USD } from './perpBroker.js';
+import { PERP_MIN_COLLATERAL_USD, PERP_MIN_LEVERAGE } from './perpBroker.js';
 import type { PerpLedger } from './perpStore.js';
 
 /**
@@ -363,7 +363,8 @@ export function decideSleeveAction(
     // never beyond hedgeLeverageMax (default 3 — sane, keeps our stop far inside
     // liquidation). If even that cannot cover the excess, we trim as much as the
     // budget allows and say so plainly.
-    const minLev = Math.max(1, cfg.hedgeLeverage ?? 1);
+    // The venue rejects < 1.1x, so our floor must clear it. Policy may raise it.
+    const minLev = Math.max(PERP_MIN_LEVERAGE, cfg.hedgeLeverage ?? 1);
     // The hedge's own ceiling AND the derived safe maximum: even when an operator
     // raises hedgeLeverageMax, bag concentration / turbulence / thin liquidity
     // still pull the effective hedge leverage down to something the stop survives.
@@ -406,7 +407,8 @@ export function decideSleeveAction(
     const overlayBudget = budget * clamp(cfg.overlayBudgetPct, 0, 1);
     if (overlayBudget >= PERP_MIN_COLLATERAL_USD) {
       const ctx = leverageContext(cfg, inputs, cfg.maxLeverage);
-      const lev = smartLeverage(ctx);
+      // Clamp to the venue's enforced floor: a fail-safe of 1x would be rejected.
+      const lev = Math.max(PERP_MIN_LEVERAGE, smartLeverage(ctx));
       const v = smartLeverageView(ctx);
       return {
         marginUsd: overlayBudget,
