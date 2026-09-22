@@ -262,11 +262,13 @@ export interface PerpsState {
   hedgeActive: boolean;
   hedgeCoveragePct: number;
   /**
-   * Cap we allow the spot book to stay net-long, as a fraction of equity. The
+   * Cap we allow the spot book to stay net-long, as a fraction of equity. A
    * hedge trims only the EXCESS above this — we do NOT delta-neutral the whole
    * bag, because the spot net-long is the strategy's upside and working capital.
    */
   maxNetExposurePct: number;
+  /** Hard USDC floor the sleeve may never spend (keeps the spot book's cash working). */
+  usdcFloorUsd: number;
   /** USD of net-long the cap permits us to keep (never hedged). */
   exposureCapUsd: number;
   /** Notional the trim must offset: the EXCESS above the cap, not the whole delta. */

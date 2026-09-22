@@ -635,6 +635,8 @@ export class PerpSleeve {
           : 0,
       /** Cap we allow the spot book to stay net-long (fraction of equity). */
       maxNetExposurePct: Math.max(0, Math.min(1, p.maxNetExposurePct ?? 0)),
+      /** Hard USDC floor the sleeve may never spend (keeps spot's cash working). */
+      usdcFloorUsd: Math.max(0, p.usdcFloorUsd ?? 0),
       /** USD of net-long that cap permits us to keep (never hedged). */
       exposureCapUsd,
       /**
