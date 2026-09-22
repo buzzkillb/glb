@@ -529,6 +529,10 @@ export class PerpSleeve {
     const equity = this.equityUsd();
     const mark = this.feed.lastPrice();
     const gridLong = mark > 0 ? this.gridNetLongUsd(mark) : 0;
+    // Leverage the hedge would actually use — its own knob, deliberately not
+    // capped by maxLeverage (which caps the directional overlay). Used only to
+    // report the margin that full neutrality would require.
+    const hedgeLev = Math.max(1, p.hedgeLeverage ?? 5);
     const eligible = Math.max(0, equity - led.principalFloorUsd);
     // Deployable budget comes from the LIVE profit signal, not a stored floor,
     // net of margin already at work so the displayed number matches what can
@@ -595,6 +599,12 @@ export class PerpSleeve {
         pos && pos.intent === 'hedge' && gridLong > 0
           ? Math.min(1, (pos.collateralUsd * pos.leverage) / gridLong)
           : 0,
+      /** Notional the hedge must reach to fully neutralize the grid delta. */
+      targetHedgeNotionalUsd: gridLong,
+      /** True only when the book is genuinely delta-neutral (hedge notional >= delta). */
+      hedgeNeutral: !!pos && pos.intent === 'hedge' && gridLong > 0 && pos.collateralUsd * pos.leverage >= gridLong - 1e-6,
+      /** Margin required to fully neutralize the delta at the configured hedge leverage. */
+      marginToNeutralizeUsd: gridLong > 0 ? gridLong / hedgeLev : 0,
       realizedPnlUsd: led.realizedPnlUsd,
       feesPaidUsd: led.feesPaidUsd,
       open: pos

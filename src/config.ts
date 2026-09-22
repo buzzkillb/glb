@@ -201,7 +201,12 @@ export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   // halt blocks new margin only, leaving the live position managed).
   haltClosesOpen: false,
   maxLeverage: 3,
-  hedgeRatio: 0.8,
+  hedgeRatio: 1.0,
+  // Hedging uses its own leverage, independent of maxLeverage (which caps the
+  // directional overlay). 5x lets a profit-sized budget actually cover a grid
+  // delta that is much larger than the sleeve's capital — without this, full
+  // neutrality is unreachable because the hedge is capped by available margin.
+  hedgeLeverage: 5,
   hedgeTriggerPct: 0.15,
   stopLossMarginPct: 0.25,
   maxLossUsd: 75,
@@ -244,8 +249,10 @@ export interface PerpSleeveConfig {
   haltClosesOpen: boolean;
   /** Leverage ceiling (2-3 recommended). */
   maxLeverage: number;
-  /** Hedge: fraction of grid net-long delta to neutralize (0..1). */
+  /** Hedge: fraction of grid net-long delta to neutralize (0..1). 1.0 = full. */
   hedgeRatio: number;
+  /** Leverage to use for the delta-neutral hedge (capped by maxLeverage). */
+  hedgeLeverage: number;
   /** Hedge arms only when grid net-long exposure exceeds this fraction of equity. */
   hedgeTriggerPct: number;
   /** Stop is placed at this fraction of margin loss — must sit INSIDE liquidation. */
@@ -395,7 +402,8 @@ export function loadConfig(): AppConfig {
         maxMarginUsd: envNumber('PERPS_MAX_MARGIN_USD', 0, 0, 1e9),
         haltClosesOpen: envBool('PERPS_HALT_CLOSES_OPEN', false),
         maxLeverage: envNumber('PERPS_MAX_LEVERAGE', 3, 1, 10),
-        hedgeRatio: envNumber('PERPS_HEDGE_RATIO', 0.8, 0, 1),
+        hedgeRatio: envNumber('PERPS_HEDGE_RATIO', 1.0, 0, 1),
+        hedgeLeverage: envNumber('PERPS_HEDGE_LEVERAGE', 5, 1, 20),
         hedgeTriggerPct: envNumber('PERPS_HEDGE_TRIGGER_PCT', 0.15, 0, 1),
         stopLossMarginPct: envNumber('PERPS_STOP_LOSS_MARGIN_PCT', 0.25, 0.01, 0.99),
         maxLossUsd: envNumber('PERPS_MAX_LOSS_USD', 75, 0, 1e9),

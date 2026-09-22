@@ -44,6 +44,8 @@ export interface PerpSleeveConfig {
   maxLeverage: number;
   /** Hedge: fraction of grid net-long delta to neutralize (0..1). */
   hedgeRatio: number;
+  /** Leverage for the delta-neutral hedge (capped by maxLeverage). */
+  hedgeLeverage?: number;
   /** Hedge arms only when grid net-long exposure exceeds this fraction of equity. */
   hedgeTriggerPct: number;
   /** Stop is placed at this fraction of margin loss — must sit INSIDE liquidation. */
@@ -155,7 +157,11 @@ export function decideSleeveAction(
     // MARGIN is (targetNotional / leverage). Applying the ratio directly as
     // margin and then leveraging it would over-hedge by a factor of the
     // leverage (e.g. 0.8*2 = 1.6x the delta → net-short instead of neutral).
-    const lev = Math.min(cfg.maxLeverage, 2);
+    // The hedge uses its OWN leverage knob and is deliberately NOT capped by
+    // maxLeverage: maxLeverage caps the directional overlay's risk, but the
+    // hedge's job is to cancel a delta the sleeve did not choose and cannot
+    // fully fund — capping it there makes neutrality unreachable.
+    const lev = Math.max(1, cfg.hedgeLeverage ?? 5);
     const targetNotional = inputs.gridNetLongUsd * clamp(cfg.hedgeRatio, 0, 1);
     const wantMargin = Math.min(budget, targetNotional / lev);
     if (wantMargin >= PERP_MIN_COLLATERAL_USD) {

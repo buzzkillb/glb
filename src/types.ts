@@ -260,6 +260,12 @@ export interface PerpsState {
   exposurePct: number;
   hedgeActive: boolean;
   hedgeCoveragePct: number;
+  /** Notional the hedge must reach to fully neutralize the grid delta. */
+  targetHedgeNotionalUsd: number;
+  /** Margin required to fully neutralize the delta at the hedge leverage. */
+  marginToNeutralizeUsd: number;
+  /** True only when hedge notional >= grid delta (genuinely neutral). */
+  hedgeNeutral: boolean;
   realizedPnlUsd: number;
   feesPaidUsd: number;
   open: {

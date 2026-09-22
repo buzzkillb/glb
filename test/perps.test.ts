@@ -31,6 +31,7 @@ const cfg = (over: Partial<PerpSleeveConfig> = {}): PerpSleeveConfig => ({
   maxMarginUsd: 250,
   maxLeverage: 3,
   hedgeRatio: 0.8,
+  hedgeLeverage: 2,
   hedgeTriggerPct: 0.15,
   stopLossMarginPct: 0.25,
   maxLossUsd: 75,
@@ -279,7 +280,7 @@ test('hedge sizes margin as notional/leverage — never over-hedges past neutral
   // With hedgeRatio 0.8 the hedge NOTIONAL must be 0.8x the grid delta, so the
   // MARGIN is 0.8*delta/lev. Sizing the ratio directly as margin would leverage
   // it into 1.6x the delta and flip the book net-short.
-  const c = cfg({ enabled: true, profitSharePct: 1, maxEquityPct: 0.5, hedgeRatio: 0.8, hedgeTriggerPct: 0.15, maxLeverage: 3 });
+  const c = cfg({ enabled: true, profitSharePct: 1, maxEquityPct: 0.5, hedgeRatio: 0.8, hedgeLeverage: 2, hedgeTriggerPct: 0.15, maxLeverage: 3 });
   const gridDelta = 2_000; // 20% of equity -> above the 15% trigger
   const d = decideSleeveAction(c, inputs({
     equityUsd: 10_500,
@@ -288,7 +289,7 @@ test('hedge sizes margin as notional/leverage — never over-hedges past neutral
     deployableMarginUsd: 10_000,
   }));
   assert.equal(d.intent, 'hedge');
-  const lev = Math.min(c.maxLeverage, 2);
+  const lev = 2; // hedge uses its own knob, not maxLeverage
   const hedgeNotional = d.marginUsd * lev;
   assert.ok(Math.abs(hedgeNotional - gridDelta * 0.8) < 1e-6, `hedge notional ${hedgeNotional} must equal 0.8*delta`);
   assert.ok(hedgeNotional < gridDelta, 'hedge must not exceed the delta (would become net-short)');

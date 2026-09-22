@@ -50,6 +50,7 @@ export class PriceOracle extends EventEmitter {
   private price = 0;
   private candles: Candle[] = []; // live, minute-grain (from quote polling)
   private history: Candle[] = []; // on-chain DEX candles (GeckoTerminal OHLCV)
+  private intraday: Candle[] = []; // hourly-only series, used for VWAP (see get vwap)
   private timer?: ReturnType<typeof setInterval>;
   private historyTimer?: ReturnType<typeof setInterval>;
   private jup: JupiterExec;
@@ -143,12 +144,27 @@ export class PriceOracle extends EventEmitter {
    * directional baseline without fabricating a number.
    */
   get vwap(): number {
-    if (this.history.length > 0) {
-      const n = Math.min(this.history.length, 60);
-      const recent = this.history.slice(-n);
-      const vol = recent.reduce((s, c) => s + c.volumeUsd, 0);
+    // Volume-weighted over the INTRADAY (hourly) tape only, bounded to the grid's
+    // real history window. Using the mixed daily+hourly series here would weight
+    // in 24h-volume bars from weeks ago and drag VWAP well below spot — which
+    // would skew grid levels and falsely trigger DCA dip buys.
+    const hours = Math.max(1, this.cfg.strategies.grid.historyHours ?? 48);
+    const from = Date.now() - hours * 3_600_000;
+    const intraday = this.intraday.filter((c) => c.ts >= from);
+    if (intraday.length > 0) {
+      const vol = intraday.reduce((s, c) => s + c.volumeUsd, 0);
       if (vol > 0) {
-        const sum = recent.reduce((s, c) => s + c.volumeUsd * c.close, 0);
+        const sum = intraday.reduce((s, c) => s + c.volumeUsd * c.close, 0);
+        return sum / vol;
+      }
+    }
+    // Fallback: bounded slice of the mixed series (still time-filtered so old
+    // daily bars cannot dominate).
+    const bounded = this.history.filter((c) => c.ts >= from);
+    if (bounded.length > 0) {
+      const vol = bounded.reduce((s, c) => s + c.volumeUsd, 0);
+      if (vol > 0) {
+        const sum = bounded.reduce((s, c) => s + c.volumeUsd * c.close, 0);
         return sum / vol;
       }
     }
@@ -234,6 +250,12 @@ export class PriceOracle extends EventEmitter {
       const merged = new Map<number, Candle>();
       for (const c of [...day, ...hour]) merged.set(c.ts, c);
       const arr = [...merged.values()].sort((a, b) => a.ts - b.ts);
+      // Keep the HOURLY series separately. The long-range series intentionally
+      // mixes daily + hourly buckets for band/high/low, but a volume-weighted
+      // average over "the last N rows" of a mixed-resolution series is wrong:
+      // daily bars carry 24h of volume and reach back weeks, so they drag the
+      // VWAP far below spot. VWAP must come from the intraday series only.
+      this.intraday = hour.slice().sort((a, b) => a.ts - b.ts);
       if (arr.length > 0) {
         this.history = arr;
         this.emit('history', arr.length);
@@ -248,10 +270,9 @@ export class PriceOracle extends EventEmitter {
       `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pool}/ohlcv/${timeframe}` +
       `?aggregate=${aggregate}&limit=${limit}`;
     const headers: Record<string, string> = { Accept: 'application/json' };
-    // NOTE: GeckoTerminal OHLCV endpoints currently 404 without a paid key, so
-    // this fetch typically fails and the caller falls back gracefully — we never
-    // fabricate candles. We do not carry a Gecko key here (meme history uses
-    // BirdEye).
+    // GeckoTerminal OHLCV is keyless (verified live: real hourly/daily candles,
+    // HTTP 200, no key). A non-OK response is surfaced as an error and the
+    // caller falls back gracefully — candles are never fabricated.
     const res = await fetch(url, { signal: AbortSignal.timeout(15000), headers });
     if (!res.ok) throw new Error(`geckoterminal HTTP ${res.status}`);
     const json = (await res.json()) as {
