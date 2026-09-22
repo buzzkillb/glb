@@ -149,3 +149,91 @@ $477.22 is *eligible*, not automatically deployed. It is still capped by the
 remaining ~$50 difference from the $527.57 tape figure is the still-open grid
 inventory's unrealized PnL — realized *banked* cash that has since been rotated
 back into grid buys, which is not yet liquid enough to post as margin.
+
+---
+
+## 9. Audit #5 (2026-09-21) — deeper correctness pass
+
+The earlier passes fixed the *displayed* numbers. This pass re-read the sizing
+and execution logic line by line and found three bugs that would only bite once
+the sleeve was actually armed. All three are now fixed and regression-tested.
+
+### 9.1 Hedge would over-hedge into a net SHORT (High)
+
+`decideSleeveAction` computed the hedge as
+`wantMargin = min(budget, gridNetLong * hedgeRatio)` and then deployed it at
+`lev = min(maxLeverage, 2)`. But `hedgeRatio` is a **notional** fraction: the
+result was a hedge notional of `0.8 * 2 = 1.6x` the grid delta — the book would
+flip net-short instead of being neutralized. The tier-2 hedge (the *first*
+thing to run once enabled) was dimensionally wrong.
+
+**Fix:** the required margin is `targetNotional / leverage`, so the notional is
+exactly `hedgeRatio * delta` and can never exceed the delta. A regression test
+asserts `marginUsd * lev == 0.8 * delta` and `< delta`.
+
+### 9.2 `maxMarginUsd = 0` silently zeroed the budget (High)
+
+`computeSleeveBudget` used `Math.min(available, equityCap, Math.max(0, maxMarginUsd))`.
+With `maxMarginUsd: 0` (the documented "uncapped" value present in the live
+config) this evaluated to a **$0 ceiling**, so that path always returned zero.
+`deployableSleeveUsd` handled 0 correctly, so the two disagreeing was a latent
+trap for any caller of the fallback path.
+
+**Fix:** `0` now means "no explicit USD ceiling" (bounded by the equity cap),
+matching `deployableSleeveUsd`. Regression test added.
+
+### 9.3 Live send failures were swallowed (High — accounting integrity)
+
+`maybeSend()` caught every error and only logged, so a `open`/`close` that
+failed to submit still returned `{ ok: true }` and the ledger booked it. The
+sleeve could then believe it was hedged while nothing existed on-chain — the
+worst failure mode for a risk sleeve.
+
+**Fix:** `maybeSend` now returns `{ sent, error }`; a live send error propagates
+and invalidates the open/close. Dry-run/paper still book the built quote
+(no send by design), so the dashboard keeps working without `LIVE_ARM`.
+
+### 9.4 `/positions/decrease` used the wrong schema (High — close would fail)
+
+The `close()` payload used `increase`-style fields (`collateralTokenDelta`,
+`side`). The live API requires `collateralUsdDelta`, `sizeUsdDelta`,
+`desiredMint`, and `positionPubkey` for `decrease` — the old payload returns
+`invalid_argument`. **Verified against the live endpoint**: old payload is
+rejected, new payload builds. `close()` and its callers now pass the venue's
+`positionPubkey`; the type was extended accordingly.
+
+### 9.5 Deviations found (Hardening)
+
+- A full close passes the position's own collateral/notional so the decrease
+  withdraws everything — consistent with `close-all` semantics.
+
+### Live verification after the restart
+
+| Field | Value |
+|---|---|
+| Budget / eligible | $471.47 |
+| Baseline / floor | $10,089.36 (dynamic, = floor) |
+| Lifetime realized | $527.57 |
+| Mark | $117.86 — healthy |
+| Equity | $10,560.83 |
+| Status | DISABLED, not halted |
+
+The Birdeye quota error now surfaces its real cause ("Compute units usage limit
+exceeded"), confirming the `meme.ts` error-detail fix is live. That is a
+separate, pre-existing quota issue on the meme strategy's OHLCV refresh — noted
+below as out of scope for the perps work but visible on the dashboard.
+
+### Verification
+
+- `tsc --noEmit` clean; `npm test` **126 tests, 124 pass, 0 fail, 2 skipped**.
+- Live round-trip probe: `open` + `close` both build valid quotes under
+  dry-run (no funds moved).
+- Restart clean; `/`, `/api/perps`, `/api/audit` all HTTP 200.
+
+### Outstanding (not perps, but observed)
+
+1. **Birdeye compute-unit quota exhausted** — the meme strategy's OHLCV tick
+   logs a 400 every cycle. Either raise the plan tier, back off the poll rate,
+   or fall back to a keyless OHLCV source. Doesn't affect the grid/DCA core.
+2. **Carry rate is still modeled**, not read from the venue's live rate.
+3. **`PERPS_ENABLED` unset** — sleeve remains inert by design.
