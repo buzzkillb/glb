@@ -1116,16 +1116,22 @@
     // we are happy to keep, and the trim targets only the excess above it.
     set('pExpCap', pctv(p.maxNetExposurePct) + ' · ' + money(p.exposureCapUsd), p.withinExposureCap ? 'pos' : 'warn');
     set('pTrimTarget', money(p.targetHedgeNotionalUsd) + (p.targetHedgeNotionalUsd > 0 ? ' @ ' + money(p.marginToNeutralizeUsd) + ' margin' : ''), p.targetHedgeNotionalUsd > 0 ? 'warn' : 'muted');
-    // Leverage range: derived from LIVE volatility, not a static guess. Show the
-    // floor, the volatility-derived safe maximum, and the ceiling, so the operator
-    // sees exactly how risky the sleeve is allowed to be right now.
+    // Leverage is DERIVED from live market + bag state, not hardcoded. Show the
+    // survival bound and every penalty so the operator sees exactly how risky the
+    // sleeve is allowed to be right now and WHY.
     const lr = p.leverageRange || {};
     set('pLevNow', (lr.recommended ?? 0).toFixed(2) + 'x', (lr.recommended ?? 0) >= 2 ? 'warn' : 'pos');
-    set('pLevCeiling', (lr.ceiling ?? 0).toFixed(1) + 'x', 'muted');
+    set('pLevCeiling', (lr.ceiling ?? 0).toFixed(2) + 'x', 'muted');
+    const pens = [];
+    if ((lr.exposureFactor ?? 1) < 1) pens.push('bag ' + pctv(lr.bagExposurePct ?? 0) + ' x' + (lr.exposureFactor ?? 1).toFixed(2));
+    if ((lr.momentumFactor ?? 1) < 1) pens.push('mkt 24h ' + ((lr.momentum24HPct ?? 0) * 100).toFixed(1) + '% x' + (lr.momentumFactor ?? 1).toFixed(2));
+    if ((lr.liquidityFactor ?? 1) < 1) pens.push('liq ' + money(lr.volumeUsd ?? 0) + ' x' + (lr.liquidityFactor ?? 1).toFixed(2));
     set(
       'pLevRange',
-      `${(lr.floor ?? 1).toFixed(0)}x floor · ${(lr.maxSafe ?? 1).toFixed(2)}x vol-safe max · ${(lr.ceiling ?? 0).toFixed(1)}x ceiling — ${lr.explanation || 'n/a'}`,
-      (lr.maxSafe ?? 1) < 1 ? 'warn' : 'muted'
+      (lr.floor ?? 1).toFixed(0) + 'x floor / ' + (lr.survivalBound ?? 1).toFixed(2) + 'x survival bound / ' + (lr.ceiling ?? 0).toFixed(2) + 'x ceiling' +
+        (pens.length ? ' / penalties: ' + pens.join(', ') : ' / no penalties') +
+        ' - ' + (lr.explanation || 'n/a'),
+      (lr.survivalBound ?? 1) < 1 ? 'warn' : 'muted'
     );
     set('pPnl', money(p.realizedPnlUsd), p.realizedPnlUsd >= 0 ? 'pos' : 'neg');
     set('pFees', money(p.feesPaidUsd), 'muted');

@@ -419,55 +419,120 @@ test('hedge leverage never exceeds hedgeLeverageMax and reports a partial trim',
 });
 
 // ---------------------------------------------------------------------------
-// SMART LEVERAGE — market-derived, volatility-bounded, fails safe.
+// SMART LEVERAGE — derived from live market AND bag state, fails safe, never
+// hardcoded. The leverage is the product of a volatility survival bound and
+// three penalties (bag concentration, market direction, liquidity), so no single
+// magic number determines it.
 // ---------------------------------------------------------------------------
 
-test('smartLeverage: calm market permits the full ceiling', () => {
-  // 1% daily range, 25% margin stop, must survive 1.2x that range.
-  // maxSafe = 0.25 / (1.2 * 0.01) = 20.83x -> clamped to the 5x ceiling.
-  const lev = smartLeverage(0.25, 0.01, 1.2, 5);
-  assert.equal(lev, 5, 'calm market must reach the configured ceiling');
+const ctx = (o: Partial<Parameters<typeof smartLeverage>[0]> = {}) => ({
+  stopLossMarginPct: 0.25,
+  vol24RangePct: 0.01,
+  volMultiplier: 1.2,
+  bagExposurePct: 0,
+  exposureCapPct: 0.35,
+  momentum24HPct: 0,
+  volumeUsd: 50_000_000,
+  minVolumeUsd: 10_000_000,
+  ceilingOverride: 0,
+  ...o,
 });
 
-test('smartLeverage: turbulence forces leverage DOWN below the ceiling', () => {
-  // 12% daily range, 25% stop, 1.2x survival. maxSafe = 0.25/(1.2*0.12)=1.74x.
-  const lev = smartLeverage(0.25, 0.12, 1.2, 5);
-  assert.ok(lev < 5, `turbulent market must not use the ceiling (got ${lev})`);
+test('smartLeverage: calm market, no penalty inputs -> full survival bound (no hardcoded cap)', () => {
+  // 1% daily range, 25% stop, survive 1.2x -> 0.25/(1.2*0.01) = 20.83x.
+  // ceilingOverride 0 means DERIVE the ceiling: it must equal the survival bound,
+  // NOT a hardcoded number like 5.
+  const lev = smartLeverage(ctx({ vol24RangePct: 0.01 }));
+  assert.ok(Math.abs(lev - 20.8333) < 0.01, `expected ~20.83x derived, got ${lev}`);
+});
+
+test('smartLeverage: turbulence forces leverage DOWN autonomously', () => {
+  // 12% daily range -> 0.25/(1.2*0.12)=1.74x. The market, not a constant, sets it.
+  const lev = smartLeverage(ctx({ vol24RangePct: 0.12 }));
   assert.ok(Math.abs(lev - 1.7361) < 0.01, `expected ~1.74x, got ${lev}`);
 });
 
 test('smartLeverage: unknown or extreme volatility fails SAFE at 1x, never guesses big', () => {
-  assert.equal(smartLeverage(0.25, 0, 1.2, 5), 1, 'no volatility data -> 1x');
-  // 30% range, 25% stop, 1.2x -> maxSafe = 0.69 < 1 -> pinned to 1.
-  assert.equal(smartLeverage(0.25, 0.3, 1.2, 5), 1, 'violent market -> 1x floor');
+  assert.equal(smartLeverage(ctx({ vol24RangePct: 0 })), 1, 'no volatility data -> 1x');
+  assert.equal(smartLeverage(ctx({ vol24RangePct: 0.3 })), 1, 'violent market -> 1x floor');
 });
 
-test('smartLeverage never exceeds the configured ceiling', () => {
-  for (const ceil of [1, 2, 3, 5, 10, 20]) {
-    const lev = smartLeverage(0.25, 0.005, 1.2, ceil);
-    assert.ok(lev <= ceil, `leverage ${lev} must respect ceiling ${ceil}`);
+test('smartLeverage: bag concentration pulls leverage down — it cannot be ignored', () => {
+  // Same calm market, but our book is 70% of equity against a 35% cap. We are
+  // concentrated, so the sleeve must take less leverage on top of it.
+  const base = smartLeverage(ctx({ vol24RangePct: 0.01, bagExposurePct: 0 }));
+  const concentrated = smartLeverage(ctx({ vol24RangePct: 0.01, bagExposurePct: 0.7 }));
+  assert.ok(concentrated < base, `concentration must reduce leverage (${concentrated} vs ${base})`);
+  // factor = cap/exposure = 0.35/0.7 = 0.5 -> 20.83 * 0.5 = 10.4x
+  assert.ok(Math.abs(concentrated - base * 0.5) < 0.1, `expected half of ${base}, got ${concentrated}`);
+});
+
+test('smartLeverage: a bag within the cap is NOT penalized (only excess risk counts)', () => {
+  const atCap = smartLeverage(ctx({ vol24RangePct: 0.01, bagExposurePct: 0.35 }));
+  const underCap = smartLeverage(ctx({ vol24RangePct: 0.01, bagExposurePct: 0.1 }));
+  assert.ok(Math.abs(atCap - underCap) < 0.01, 'being under the cap must not change leverage');
+});
+
+test('smartLeverage: falling market reduces leverage, rising market does not inflate it', () => {
+  const flat = smartLeverage(ctx({ momentum24HPct: 0 }));
+  const falling = smartLeverage(ctx({ momentum24HPct: -0.1 }));
+  const rising = smartLeverage(ctx({ momentum24HPct: 0.15 }));
+  assert.ok(falling < flat, `a down tape must cut leverage (${falling} vs ${flat})`);
+  assert.ok(rising <= flat + 1e-9, 'an up tape must never inflate leverage above the bound');
+});
+
+test('smartLeverage: thin liquidity reduces leverage, deep liquidity does not', () => {
+  const deep = smartLeverage(ctx({ volumeUsd: 50_000_000 }));
+  const thin = smartLeverage(ctx({ volumeUsd: 3_000_000 }));
+  assert.ok(thin < deep, `thin book must cut leverage (${thin} vs ${deep})`);
+});
+
+test('smartLeverage: ceilingOverride pins a policy cap but the market still governs below it', () => {
+  // Policy wants <= 5x. In a calm market the derived number would be 20.8x, so
+  // the policy cap binds. But in a violent market the market bound must win.
+  const calm = smartLeverage(ctx({ vol24RangePct: 0.01, ceilingOverride: 5 }));
+  assert.equal(calm, 5, 'policy ceiling must bind in a calm market');
+  const violent = smartLeverage(ctx({ vol24RangePct: 0.25, ceilingOverride: 5 }));
+  assert.ok(violent < 5, 'the market bound must govern below any policy ceiling');
+});
+
+test('smartLeverage never exceeds the derived ceiling, ever', () => {
+  for (const vol of [0.005, 0.02, 0.05, 0.12]) {
+    for (const ceil of [0, 2, 3, 5, 20]) {
+      const v = smartLeverageView(ctx({ vol24RangePct: vol, ceilingOverride: ceil }));
+      assert.ok(v.recommended <= v.ceiling + 1e-9, `leverage ${v.recommended} must respect ceiling ${v.ceiling}`);
+      assert.ok(v.recommended <= v.survivalBound + 1e-9, 'must never exceed the survival bound');
+    }
   }
 });
 
-test('smartLeverageView reports the range and the binding constraint', () => {
-  const calm = smartLeverageView(0.25, 0.01, 1.2, 5);
-  assert.equal(calm.floor, 1);
-  assert.equal(calm.ceiling, 5);
-  assert.equal(calm.recommended, 5);
-  assert.match(calm.explanation, /ceiling 5x binds/);
+test('smartLeverageView exposes every penalty so the number is never a black box', () => {
+  const concentrated = smartLeverageView(
+    ctx({ vol24RangePct: 0.01, bagExposurePct: 0.7, momentum24HPct: -0.1, volumeUsd: 3_000_000 })
+  );
+  assert.ok(concentrated.exposureFactor < 1, 'bag penalty must be reported');
+  assert.ok(concentrated.momentumFactor < 1, 'direction penalty must be reported');
+  assert.ok(concentrated.liquidityFactor < 1, 'liquidity penalty must be reported');
+  assert.ok(concentrated.recommended < concentrated.survivalBound, 'penalties must lower the result');
+  assert.match(concentrated.explanation, /bag/);
+  assert.match(concentrated.explanation, /market down/);
+  assert.match(concentrated.explanation, /thin volume/);
 
-  const turb = smartLeverageView(0.25, 0.12, 1.2, 5);
-  assert.ok(turb.maxSafe < 5 && turb.recommended === turb.maxSafe, 'volatility must bind, not the ceiling');
-  assert.match(turb.explanation, /1\.74x/);
-
-  const violent = smartLeverageView(0.25, 0.4, 1.2, 5);
-  assert.equal(violent.recommended, 1);
-  assert.match(violent.explanation, /pinned to 1x/);
+  const clean = smartLeverageView(ctx({ vol24RangePct: 0.01, bagExposurePct: 0 }));
+  assert.equal(clean.exposureFactor, 1);
+  assert.equal(clean.momentumFactor, 1);
+  assert.equal(clean.liquidityFactor, 1);
 });
 
-test('overlay leverage is volatility-derived, not a static 3x', () => {
-  // The bug this replaces: a hardcoded clamp(...,1,3) silently ignored
-  // PERPS_MAX_LEVERAGE above 3. Now a calm market with ceiling 5 must yield 5x.
+test('smartLeverageView fails safe when market data is missing', () => {
+  const v = smartLeverageView(ctx({ vol24RangePct: 0 }));
+  assert.equal(v.recommended, 1);
+  assert.match(v.explanation, /failing safe/);
+});
+
+test('overlay leverage is derived from bag + market, not a static 3x', () => {
+  // The bug this replaces: a hardcoded clamp(...,1,3) silently ignored the
+  // configured ceiling. Now a calm market with the ceiling raised must reach it.
   const c = cfg({
     enabled: true,
     profitSharePct: 1,
@@ -476,6 +541,7 @@ test('overlay leverage is volatility-derived, not a static 3x', () => {
     overlayBudgetPct: 1,
     maxLeverage: 5,
     leverageVolMultiplier: 1.2,
+    leverageMinVolumeUsd: 10_000_000,
     maxNetExposurePct: 0,
     hedgeTriggerPct: 1, // disable hedge so the overlay tier is reached
   });
@@ -485,9 +551,10 @@ test('overlay leverage is volatility-derived, not a static 3x', () => {
     gridNetLongUsd: 0,
     deployableMarginUsd: 400,
     vol24RangePct: 0.01,
+    volumeUsd: 50_000_000,
   }));
   assert.equal(calm.intent, 'overlay');
-  assert.equal(calm.lev, 5, 'calm market must use the raised ceiling, not a static 3x');
+  assert.equal(calm.lev, 5, 'calm market must reach the raised ceiling, not a static 3x');
 
   const turb = decideSleeveAction(c, inputs({
     equityUsd: 10_500,
@@ -495,15 +562,37 @@ test('overlay leverage is volatility-derived, not a static 3x', () => {
     gridNetLongUsd: 0,
     deployableMarginUsd: 400,
     vol24RangePct: 0.12,
+    volumeUsd: 50_000_000,
   }));
   assert.equal(turb.intent, 'overlay');
   assert.ok(turb.lev < 5, `turbulence must pull the overlay leverage down (got ${turb.lev})`);
   assert.match(turb.reason, /overlay/);
+
+  // Thin liquidity must reduce it further, proving the market feed is live-wired.
+  // Use a higher-vol context so the survival bound (4.17x) sits below the policy
+  // ceiling, letting the liquidity penalty actually show through.
+  const deep = decideSleeveAction(c, inputs({
+    equityUsd: 10_500,
+    ledger: ledger({ principalFloorUsd: 10_000 }),
+    gridNetLongUsd: 0,
+    deployableMarginUsd: 400,
+    vol24RangePct: 0.05,
+    volumeUsd: 50_000_000,
+  }));
+  const thin = decideSleeveAction(c, inputs({
+    equityUsd: 10_500,
+    ledger: ledger({ principalFloorUsd: 10_000 }),
+    gridNetLongUsd: 0,
+    deployableMarginUsd: 400,
+    vol24RangePct: 0.05,
+    volumeUsd: 1_000_000,
+  }));
+  assert.ok(thin.lev < deep.lev, `thin liquidity must cut overlay leverage (${thin.lev} vs ${deep.lev})`);
 });
 
-test('hedge leverage is also capped by volatility, not just hedgeLeverageMax', () => {
-  // Even if an operator raises hedgeLeverageMax, a turbulent market must pull the
-  // effective hedge leverage down to something our stop can survive.
+test('hedge leverage is capped by the same bag+market model, not just hedgeLeverageMax', () => {
+  // Even with hedgeLeverageMax raised, a turbulent market must pull the effective
+  // hedge leverage down to something our stop can survive.
   const c = cfg({
     enabled: true,
     profitSharePct: 1,
@@ -521,8 +610,38 @@ test('hedge leverage is also capped by volatility, not just hedgeLeverageMax', (
     ledger: ledger({ principalFloorUsd: 10_000 }),
     gridNetLongUsd: 5_000,
     deployableMarginUsd: 100,
-    vol24RangePct: 0.12, // turbulent -> smart cap ~1.74x
+    vol24RangePct: 0.12, // turbulent -> survival bound ~1.74x
+    volumeUsd: 50_000_000,
   }));
   assert.equal(d.intent, 'hedge');
-  assert.ok(d.lev <= 1.7400, `hedge leverage ${d.lev} must respect the volatility cap`);
+  assert.ok(d.lev <= 1.7400, `hedge leverage ${d.lev} must respect the market survival bound`);
 });
+
+test('hedge leverage drops when our bag is over-concentrated', () => {
+  const c = cfg({
+    enabled: true,
+    profitSharePct: 1,
+    maxEquityPct: 0.5,
+    hedgeRatio: 1.0,
+    hedgeLeverage: 1,
+    hedgeLeverageMax: 15,
+    leverageVolMultiplier: 1.2,
+    maxNetExposurePct: 0.35,
+    hedgeTriggerPct: 0.15,
+    maxLeverage: 5,
+  });
+  // Book is 80% of equity -> far over the 35% cap, so the bag penalty binds.
+  const d = decideSleeveAction(c, inputs({
+    equityUsd: 10_000,
+    ledger: ledger({ principalFloorUsd: 9_000 }),
+    gridNetLongUsd: 8_000,
+    deployableMarginUsd: 5_000,
+    vol24RangePct: 0.01,
+    volumeUsd: 50_000_000,
+  }));
+  assert.equal(d.intent, 'hedge');
+  // survival 20.83x, bag factor 0.35/0.8=0.4375 -> ~9.1x, still under hedgeLeverageMax 15.
+  assert.ok(d.lev < 15, `concentration must pull hedge leverage below the ceiling (got ${d.lev})`);
+  assert.ok(d.lev < 20, 'must not exceed the survival bound');
+});
+

@@ -200,17 +200,19 @@ export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   // When the loss ceiling trips, also flatten any open position (default off:
   // halt blocks new margin only, leaving the live position managed).
   haltClosesOpen: false,
-  // CEILING only. The leverage actually used is derived from live volatility by
-  // smartLeverage(): calm markets permit more, turbulent ones force less. This
-  // is the hard upper bound the smart function can never exceed. 5 is "slightly
-  // riskier" than the old 3, while a 25% margin stop still sits far inside
-  // liquidation and survives ordinary noise (validated against the live 24h
-  // range). Raise deliberately; the smart cap still governs.
-  maxLeverage: 5,
+  // POLICY CEILING OVERRIDE. 0 (default) = NO hardcoded ceiling: the leverage
+  // ceiling is DERIVED from the venue's live volatility each poll. Set > 0 only
+  // to pin an absolute cap for policy; even then the volatility/survival bound
+  // still governs below it. This repo ships with no magic leverage number.
+  maxLeverage: 0,
   // How many recent 24h ranges of adverse move the position must SURVIVE before
   // our margin stop is hit. Higher = safer = lower leverage. 1.2 means we stop
-  // only after a move 1.2x the entire day's range — well beyond ordinary noise.
+  // only after a move 1.2x the entire day's range — beyond ordinary noise. This
+  // is a POLICY input (how much shock we insist on surviving), not a result.
   leverageVolMultiplier: 1.2,
+  // Market liquidity floor: below this 24h traded volume the book is treated as
+  // thin and leverage is scaled down. Policy input, not a magic number.
+  leverageMinVolumeUsd: 10_000_000,
   hedgeRatio: 1.0,
   // Hedging uses its own leverage, independent of maxLeverage (which caps the
   // directional overlay). The controller auto-scales from this floor up to
@@ -269,19 +271,22 @@ export interface PerpSleeveConfig {
    */
   haltClosesOpen: boolean;
   /**
-   * Absolute leverage CEILING (hard upper bound). The leverage actually used is
-   * derived from live volatility via smartLeverage(); this only caps it. A value
-   * the smart function can never exceed, so raising it cannot make a calm-market
-   * position reckless — turbulence forces the effective number down.
+   * POLICY leverage ceiling override. 0 (default) = no hardcoded ceiling: the
+   * ceiling is DERIVED from live venue volatility. Set > 0 only to pin an
+   * absolute policy cap; the volatility/survival bound still governs below it.
    */
   maxLeverage: number;
   /**
    * Volatility multiple. The position is sized so it SURVIVES an adverse move of
    * this many recent 24h ranges before the margin stop triggers. Higher = safer
-   * = lower leverage. This is what makes the leverage "smart": market-derived,
-   * not a static guess.
+   * = lower leverage. A POLICY input (shock tolerance), never a magic result.
    */
   leverageVolMultiplier: number;
+  /**
+   * Market-liquidity floor (USD 24h volume). Below this the book is thin and
+   * leverage is scaled down. Policy input, not a hardcoded leverage.
+   */
+  leverageMinVolumeUsd?: number;
   /** Hedge: fraction of grid net-long delta to neutralize (0..1). 1.0 = full. */
   hedgeRatio: number;
   /**
@@ -453,8 +458,10 @@ export function loadConfig(): AppConfig {
         maxEquityPct: envNumber('PERPS_MAX_EQUITY_PCT', 0.1, 0, 1),
         maxMarginUsd: envNumber('PERPS_MAX_MARGIN_USD', 0, 0, 1e9),
         haltClosesOpen: envBool('PERPS_HALT_CLOSES_OPEN', false),
-        maxLeverage: envNumber('PERPS_MAX_LEVERAGE', 5, 1, 20),
+        // 0 = derive the ceiling from live volatility (no hardcoded leverage).
+        maxLeverage: envNumber('PERPS_MAX_LEVERAGE', 0, 0, 20),
         leverageVolMultiplier: envNumber('PERPS_LEVERAGE_VOL_MULTIPLIER', 1.2, 0.1, 10),
+        leverageMinVolumeUsd: envNumber('PERPS_LEVERAGE_MIN_VOLUME_USD', 10_000_000, 0, 1e12),
         hedgeRatio: envNumber('PERPS_HEDGE_RATIO', 1.0, 0, 1),
         hedgeLeverage: envNumber('PERPS_HEDGE_LEVERAGE', 1, 1, 20),
         hedgeLeverageMax: envNumber('PERPS_HEDGE_LEVERAGE_MAX', 3, 1, 20),

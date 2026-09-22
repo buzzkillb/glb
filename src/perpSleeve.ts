@@ -218,9 +218,9 @@ export class PerpSleeve {
       }
     }
 
-    // Live volatility for smartLeverage(): the venue mark feed's 24h high/low
-    // give us the real recent range. This is what makes leverage market-derived
-    // rather than a static guess — turbulence pulls the effective leverage down.
+    // Live volatility, direction and liquidity for smartLeverage(): the venue
+    // mark feed's 24h high/low/change/volume give us the real market state. This
+    // is what makes leverage market- and bag-derived rather than a static guess.
     const vol24RangePct =
       mark.price > 0 && mark.priceHigh24H > 0 && mark.priceLow24H > 0 && mark.priceHigh24H >= mark.priceLow24H
         ? (mark.priceHigh24H - mark.priceLow24H) / mark.price
@@ -232,6 +232,11 @@ export class PerpSleeve {
       gridNetLongUsd: this.gridNetLongUsd(mark.price),
       markPrice: mark.price,
       vol24RangePct,
+      // The venue returns priceChange24H as a USD delta (e.g. -0.06), NOT a
+      // fraction. Normalize to a fractional return so the market-direction
+      // penalty is scale-correct for any asset, and clamp to a sane band.
+      momentum24HPct: mark.price > 0 ? Math.max(-1, Math.min(1, mark.priceChange24H / mark.price)) : 0,
+      volumeUsd: mark.volumeUsd,
     };
 
     const open = this.ledger.snapshotLedger().position;
@@ -671,12 +676,21 @@ export class PerpSleeve {
           m && m.price > 0 && m.priceHigh24H > 0 && m.priceLow24H > 0
             ? (m.priceHigh24H - m.priceLow24H) / m.price
             : 0;
-        return smartLeverageView(
-          p.stopLossMarginPct,
-          vol,
-          p.leverageVolMultiplier ?? 1.2,
-          p.maxLeverage
-        );
+        const equity = this.equityUsd();
+        const mark = this.feed.lastPrice();
+        return smartLeverageView({
+          stopLossMarginPct: p.stopLossMarginPct,
+          vol24RangePct: vol,
+          volMultiplier: p.leverageVolMultiplier ?? 1.2,
+          bagExposurePct: equity > 0 && mark > 0 ? this.gridNetLongUsd(mark) / equity : 0,
+          exposureCapPct: p.maxNetExposurePct ?? 0,
+          // Venue priceChange24H is a USD delta; normalize to a fraction.
+          momentum24HPct:
+            m && m.price > 0 ? Math.max(-1, Math.min(1, m.priceChange24H / m.price)) : 0,
+          volumeUsd: m?.volumeUsd ?? 0,
+          minVolumeUsd: p.leverageMinVolumeUsd ?? 0,
+          ceilingOverride: p.maxLeverage,
+        });
       })(),
       note:
         'Sleeve is funded ONLY by equity above the untouchable principal floor; base spot capital is never at risk.',

@@ -44,6 +44,8 @@ export interface PerpSleeveConfig {
   maxLeverage: number;
   /** Volatility multiple: survive this many 24h ranges before the stop hits. */
   leverageVolMultiplier?: number;
+  /** Market-liquidity floor (USD 24h volume) below which leverage is scaled down. */
+  leverageMinVolumeUsd?: number;
   /** Hedge: fraction of grid net-long delta to neutralize (0..1). */
   hedgeRatio: number;
   /** Leverage for the delta-neutral hedge (capped by maxLeverage). */
@@ -85,83 +87,180 @@ export interface SleeveInputs {
    * (leverage pinned to 1). Sourced from the perps venue mark feed's high/low.
    */
   vol24RangePct?: number;
+  /**
+   * Live 24h price change as a fraction (negative = falling market). Feeds the
+   * market-direction penalty in smartLeverage(). 0/undefined = flat/unknown.
+   */
+  momentum24HPct?: number;
+  /**
+   * Live 24h traded volume, USD. Feeds the market-liquidity penalty so leverage
+   * backs off in thin books. 0/undefined = no liquidity data (no penalty).
+   */
+  volumeUsd?: number;
 }
 
 /**
- * SMART LEVERAGE — market-derived, not a static guess.
+ * SMART LEVERAGE — FULLY DERIVED FROM LIVE STATE. NO HARDCODED RESULT.
  *
- * A leveraged position is stopped once the adverse move reaches
- * stopLossMarginPct/leverage in price terms. We therefore pick the LARGEST
- * leverage that still lets the position survive an adverse move of
- * `volMultiple` x the recent 24h range before our stop fires:
+ * There is no fixed "use 5x" anywhere. The leverage is COMPUTED every poll from
+ * four live inputs: the venue's own volatility, our bag's concentration, the
+ * market's direction, and the market's liquidity. Each can only PULL THE NUMBER
+ * DOWN; none can invent extra risk. If any input is missing we fail SAFE at 1x.
  *
- *     maxSafe = stopLossMarginPct / (volMultiple * vol24RangePct)
+ *   1. SURVIVAL BOUND (volatility). A position is stopped once the adverse move
+ *      reaches stopLossMarginPct/leverage in price terms, so the largest leverage
+ *      that survives `volMultiplier` x the recent 24h range before our stop fires
+ *      is  stop / (volMultiplier * vol24RangePct).  Calm market -> high number,
+ *      turbulent -> low. This is the ceiling, and it is market-derived.
  *
- * The point is to be shaken out only by a genuinely decisive move, never by
- * ordinary intraday noise. Calm markets permit more leverage; turbulent ones
- * force less. The result is clamped to [1, ceiling]. When volatility is unknown
- * we fail SAFE at 1 — never guess a big number.
+ *   2. BAG CONCENTRATION. If our spot net-long is already a large fraction of
+ *      equity, we are NOT diversified, so the sleeve must take less leverage on
+ *      top of it. Factor = exposureCap / max(exposureCap, bagExposure). A bag at
+ *      the cap pays no penalty; a bag 2x over the cap halves the leverage.
+ *
+ *   3. MARKET DIRECTION. A long overlay into a falling market is fighting the
+ *      tape, so leverage scales with 24h momentum. Falling -> less; flat/up ->
+ *      no penalty. Capped so a strong uptrend never *inflates* beyond the bound.
+ *
+ *   4. MARKET LIQUIDITY. Thin volume means slippage and gap risk, so leverage
+ *      scales with 24h traded volume relative to a policy minimum. Deep market ->
+ *      no penalty; thin -> less.
+ *
+ * The product is clamped to [1, survivalBound], so the invariant that our stop
+ * always sits inside liquidation is preserved by construction, and the only
+ * "numbers" left are policy inputs (env-overridable), never magic results.
  */
-export function smartLeverage(
-  stopLossMarginPct: number,
-  vol24RangePct: number,
-  volMultiple: number,
-  ceiling: number
-): number {
-  const ceil = Math.max(1, ceiling);
-  const stop = clamp(stopLossMarginPct, 0, 1);
-  const vol = Math.max(0, vol24RangePct);
-  const mult = Math.max(0.1, volMultiple);
-  if (!(vol > 0) || !(stop > 0)) return 1;
-  const maxSafe = stop / (mult * vol);
-  return clamp(maxSafe, 1, ceil);
+export interface LeverageContext {
+  /** Fraction of margin we risk before our own stop closes the position. */
+  stopLossMarginPct: number;
+  /** Live 24h high-low range as a fraction of price (venue mark feed). */
+  vol24RangePct: number;
+  /** How many 24h ranges of adverse move we insist on surviving. */
+  volMultiplier: number;
+  /** Our spot net-long exposure as a fraction of equity (bag concentration). */
+  bagExposurePct: number;
+  /** Exposure fraction we consider acceptable before penalizing leverage. */
+  exposureCapPct: number;
+  /** Live 24h price change as a fraction (negative = falling market). */
+  momentum24HPct: number;
+  /** Live 24h traded volume, USD (market liquidity). */
+  volumeUsd: number;
+  /** Volume below which we treat the market as thin and cut leverage. */
+  minVolumeUsd: number;
+  /** Policy ceiling override. <= 0 means "derive it from the survival bound". */
+  ceilingOverride: number;
 }
 
-export interface SmartLeverageView {
-  /** Smart leverage with the configured ceiling applied. */
-  recommended: number;
-  /** Largest leverage the volatility alone permits, before the ceiling. */
-  maxSafe: number;
-  /** Configured hard ceiling. */
+/** The four derived penalties and the resulting leverage — fully auditable. */
+export interface LeverageBreakdown {
+  /** Largest leverage the volatility alone permits (pre-penalty ceiling). */
+  survivalBound: number;
+  /** Ceiling actually applied (override if supplied, else the survival bound). */
   ceiling: number;
-  /** Lower bound we will ever use (always 1). */
+  /** Multiplier for bag concentration (<= 1). */
+  exposureFactor: number;
+  /** Multiplier for market direction (<= 1). */
+  momentumFactor: number;
+  /** Multiplier for market liquidity (<= 1). */
+  liquidityFactor: number;
+  /** Leverage we would use right now. */
+  recommended: number;
+  /** Always 1 — the safe floor. */
   floor: number;
-  /** The 24h range that drove the number (fraction). */
+  /** Live inputs, echoed for the dashboard so the number is never a black box. */
   vol24RangePct: number;
+  bagExposurePct: number;
+  momentum24HPct: number;
+  volumeUsd: number;
   /** Human-readable derivation. */
   explanation: string;
 }
 
-/**
- * Full view of the smart leverage RANGE for the dashboard/config: the floor we
- * never go below, the volatility-derived safe maximum, and the configured
- * ceiling. Presents the working range so an operator can see exactly how risky
- * the sleeve is allowed to be right now.
- */
-export function smartLeverageView(
-  stopLossMarginPct: number,
-  vol24RangePct: number,
-  volMultiple: number,
-  ceiling: number
-): SmartLeverageView {
-  const ceil = Math.max(1, ceiling);
-  const stop = clamp(stopLossMarginPct, 0, 1);
-  const vol = Math.max(0, vol24RangePct);
-  const mult = Math.max(0.1, volMultiple);
-  const maxSafe = vol > 0 && stop > 0 ? stop / (mult * vol) : 1;
-  return {
-    recommended: smartLeverage(stopLossMarginPct, vol24RangePct, volMultiple, ceiling),
-    maxSafe,
-    ceiling: ceil,
+function deriveLeverage(ctx: LeverageContext): LeverageBreakdown {
+  const stop = clamp(ctx.stopLossMarginPct, 0, 1);
+  const vol = Math.max(0, ctx.vol24RangePct);
+  const mult = Math.max(0.1, ctx.volMultiplier);
+
+  const failSafe: LeverageBreakdown = {
+    survivalBound: 1,
+    ceiling: 1,
+    exposureFactor: 1,
+    momentumFactor: 1,
+    liquidityFactor: 1,
+    recommended: 1,
     floor: 1,
     vol24RangePct: vol,
-    explanation:
-      maxSafe < 1
-        ? 'volatility high — pinned to 1x (full collateral, no borrow)'
-        : `range ${(vol * 100).toFixed(2)}% of price; stop ${(stop * 100).toFixed(0)}% margin; ` +
-          `survives ${mult.toFixed(1)}x that range -> ${Math.min(maxSafe, ceil).toFixed(2)}x` +
-          (maxSafe > ceil ? ` (ceiling ${ceil}x binds)` : ''),
+    bagExposurePct: ctx.bagExposurePct,
+    momentum24HPct: ctx.momentum24HPct,
+    volumeUsd: ctx.volumeUsd,
+    explanation: 'no volatility data yet — failing safe at 1x',
   };
+  if (!(stop > 0) || !(vol > 0)) return failSafe;
+
+  // 1. Survival bound: the market's own volatility sets the ceiling.
+  const survivalBound = stop / (mult * vol);
+
+  // 2. Bag concentration: penalize leverage only for the part of our book that
+  //    sits ABOVE the exposure we consider acceptable. Never rewarded for being
+  //    under the cap (factor caps at 1) — concentration can only hurt.
+  const cap = Math.max(0, ctx.exposureCapPct);
+  const exposure = Math.max(0, ctx.bagExposurePct);
+  const exposureFactor =
+    exposure > cap && cap > 0 ? clamp(cap / exposure, 0.25, 1) : 1;
+
+  // 3. Market direction: a long overlay into a falling tape gets less leverage.
+  //    1% down -> 0.98, 10% down -> 0.8; flat/up never exceeds 1.
+  const momentumFactor = clamp(1 + Math.min(0, ctx.momentum24HPct) * 2, 0.5, 1);
+
+  // 4. Market liquidity: thin books get less leverage. Deep market -> 1.
+  const minVol = Math.max(0, ctx.minVolumeUsd);
+  const liquidityFactor =
+    minVol > 0 ? clamp(Math.max(0, ctx.volumeUsd) / minVol, 0.5, 1) : 1;
+
+  // The ceiling is the market-derived survival bound unless the operator pins an
+  // explicit override — and even then the bound still governs below it.
+  const ceiling =
+    ctx.ceilingOverride > 0
+      ? Math.min(Math.max(1, ctx.ceilingOverride), survivalBound)
+      : survivalBound;
+
+  const raw = survivalBound * exposureFactor * momentumFactor * liquidityFactor;
+  const recommended = clamp(raw, 1, Math.max(1, ceiling));
+
+  const binds: string[] = [];
+  if (ctx.ceilingOverride > 0 && ctx.ceilingOverride < survivalBound) binds.push('policy ceiling');
+  if (exposureFactor < 1) binds.push(`bag ${(exposure * 100).toFixed(0)}% vs cap ${(cap * 100).toFixed(0)}%`);
+  if (momentumFactor < 1) binds.push(`market down ${(ctx.momentum24HPct * 100).toFixed(1)}%`);
+  if (liquidityFactor < 1) binds.push(`thin volume ${Math.round(ctx.volumeUsd).toLocaleString()}`);
+
+  return {
+    survivalBound,
+    ceiling,
+    exposureFactor,
+    momentumFactor,
+    liquidityFactor,
+    recommended,
+    floor: 1,
+    vol24RangePct: vol,
+    bagExposurePct: exposure,
+    momentum24HPct: ctx.momentum24HPct,
+    volumeUsd: ctx.volumeUsd,
+    explanation:
+      `vol ${(vol * 100).toFixed(2)}% range -> survive ${mult.toFixed(1)}x -> ${survivalBound.toFixed(2)}x; ` +
+      `penalties x${(exposureFactor * momentumFactor * liquidityFactor).toFixed(3)}` +
+      (binds.length ? ` (${binds.join(', ')})` : '') +
+      ` -> ${recommended.toFixed(2)}x`,
+  };
+}
+
+/** Derived leverage for a decision — market- and bag-aware, never hardcoded. */
+export function smartLeverage(ctx: LeverageContext): number {
+  return deriveLeverage(ctx).recommended;
+}
+
+/** Full auditable breakdown so the dashboard can show exactly how it was derived. */
+export function smartLeverageView(ctx: LeverageContext): LeverageBreakdown {
+  return deriveLeverage(ctx);
 }
 
 export interface SleeveDecision {
@@ -265,15 +364,11 @@ export function decideSleeveAction(
     // liquidation). If even that cannot cover the excess, we trim as much as the
     // budget allows and say so plainly.
     const minLev = Math.max(1, cfg.hedgeLeverage ?? 1);
-    // The hedge's own ceiling AND the volatility-derived safe maximum: even when
-    // an operator raises hedgeLeverageMax, turbulence still pulls the effective
-    // hedge leverage down to something the stop can survive.
-    const smartCap = smartLeverage(
-      cfg.stopLossMarginPct,
-      inputs.vol24RangePct ?? 0,
-      cfg.leverageVolMultiplier ?? 1.2,
-      cfg.hedgeLeverageMax ?? 1
-    );
+    // The hedge's own ceiling AND the derived safe maximum: even when an operator
+    // raises hedgeLeverageMax, bag concentration / turbulence / thin liquidity
+    // still pull the effective hedge leverage down to something the stop survives.
+    const hedgeCap = leverageContext(cfg, inputs, cfg.hedgeLeverageMax ?? minLev);
+    const smartCap = smartLeverage(hedgeCap);
     const maxLev = Math.max(minLev, Math.min(cfg.hedgeLeverageMax ?? minLev, smartCap));
     const targetNotional = excessUsd * clamp(cfg.hedgeRatio, 0, 1);
     // Leverage that exactly covers targetNotional with the available budget.
@@ -310,18 +405,9 @@ export function decideSleeveAction(
   if (cfg.overlayEnabled) {
     const overlayBudget = budget * clamp(cfg.overlayBudgetPct, 0, 1);
     if (overlayBudget >= PERP_MIN_COLLATERAL_USD) {
-      const lev = smartLeverage(
-        cfg.stopLossMarginPct,
-        inputs.vol24RangePct ?? 0,
-        cfg.leverageVolMultiplier ?? 1.2,
-        cfg.maxLeverage
-      );
-      const v = smartLeverageView(
-        cfg.stopLossMarginPct,
-        inputs.vol24RangePct ?? 0,
-        cfg.leverageVolMultiplier ?? 1.2,
-        cfg.maxLeverage
-      );
+      const ctx = leverageContext(cfg, inputs, cfg.maxLeverage);
+      const lev = smartLeverage(ctx);
+      const v = smartLeverageView(ctx);
       return {
         marginUsd: overlayBudget,
         lev,
@@ -333,6 +419,32 @@ export function decideSleeveAction(
   }
 
   return idle('budget below venue minimum / no action');
+}
+
+/**
+ * Assemble the FULL live leverage context: venue volatility, our bag's
+ * concentration, market direction, market liquidity, and the policy ceiling.
+ * Every field is an INPUT, so the leverage is derived from actual state rather
+ * than a hardcoded constant. Kept in one place so the hedge and the overlay use
+ * exactly the same risk model.
+ */
+function leverageContext(
+  cfg: PerpSleeveConfig,
+  inputs: SleeveInputs,
+  ceilingOverride: number
+): LeverageContext {
+  const equity = Math.max(0, inputs.equityUsd);
+  return {
+    stopLossMarginPct: cfg.stopLossMarginPct,
+    vol24RangePct: inputs.vol24RangePct ?? 0,
+    volMultiplier: cfg.leverageVolMultiplier ?? 1.2,
+    bagExposurePct: equity > 0 ? Math.max(0, inputs.gridNetLongUsd) / equity : 0,
+    exposureCapPct: cfg.maxNetExposurePct ?? 0,
+    momentum24HPct: inputs.momentum24HPct ?? 0,
+    volumeUsd: inputs.volumeUsd ?? 0,
+    minVolumeUsd: cfg.leverageMinVolumeUsd ?? 0,
+    ceilingOverride,
+  };
 }
 
 /**

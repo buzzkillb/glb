@@ -49,9 +49,94 @@ drives the strategy signals is what execution would use, so the price you see
 is the price you would get. CoinGecko is used as a fallback if Jupiter is
 unreachable. No API key is needed for the SOL book.
 
-The only key in the whole project is a free BirdEye API key, used only for
-on-chain OHLCV data for the meme-coin slot. It is read from an environment
-variable and is never committed.
+For the meme-coin slot the bot primarily uses **GeckoTerminal's public OHLCV
+API, which needs no key at all**. An optional free BirdEye key can be supplied
+for extra depth, but it is entirely optional, read from an environment variable,
+and never committed. See [Secrets and GitHub safety](#secrets-and-github-safety).
+
+## Perps sleeve
+
+On top of the spot grid and DCA, the bot has an **isolated perps sleeve** that
+uses Jupiter Perps. It is deliberately a *satellite*, not a second strategy:
+
+- **It is funded only by profit.** No principal is ever risked on perps. The
+  sleeve computes a dynamic principal floor from the real trading-origin cost
+  basis and only spends equity *above* that floor. If the strategy is flat or
+  down, the sleeve deploys nothing.
+- **It has its own ledger and risk budget.** It never shares `RISK_MAX_USDC`
+  with the spot strategies, so a perps loss cannot starve the grid.
+- **It is off by default.** Nothing happens until `PERPS_ENABLED=1`.
+- **It never liquidates.** Every open is checked against the venue's maintenance
+  requirement, and our own stop is asserted to sit far inside liquidation before
+  the position is ever sent. A hard stop closes the position first.
+
+There are two intents, and both are **trims**, never a full conversion:
+
+- **Hedge (Tier 2).** The spot book's net-long is the strategy's directional
+  upside, *not* accidental risk. So the hedge does **not** neutralize the whole
+  bag. `PERPS_MAX_NET_EXPOSURE_PCT` is the exposure we are happy to keep; the
+  hedge targets only the **excess above it**. Hedging the entire book would mean
+  paying carry/funding on notional many times the sleeve's size and giving up
+  the edge the strategy exists to capture.
+- **Directional overlay (Tier 3).** A small profit-seeking long, only when
+  enabled.
+
+### Leverage is derived, never hardcoded
+
+There is no "use 5x" anywhere in this repo. The leverage is **computed on every
+poll from live state** and is the product of a market-derived survival bound and
+three penalties, any of which can only pull the number *down*:
+
+```
+survivalBound = stopLossMarginPct / (volMultiplier * vol24RangePct)   # venue volatility
+               * exposureFactor    (our bag's concentration vs the exposure cap)
+               * momentumFactor    (falling market -> less leverage)
+               * liquidityFactor   (thin 24h volume -> less leverage)
+```
+
+The survival bound comes from the venue's live 24h high/low: we size so the
+position survives an adverse move of `volMultiplier` × the day's range before our
+stop fires, so ordinary noise can never shake us out. The bag factor scales down
+when our spot net-long is over-concentrated. The momentum and liquidity factors
+back off in a falling or thin market. If volatility data is missing the bot
+**fails safe at 1x** — it never guesses a big number. Every penalty is surfaced on
+the dashboard so the resulting leverage is auditable, not a black box.
+
+Policy inputs (all env-overridable) are shock tolerance and market floors, not
+leverage results:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `PERPS_ENABLED` | `0` | Master switch; sleeve is inert until set to `1` |
+| `PERPS_MAX_LEVERAGE` | `0` | Policy ceiling override. `0` = no hardcoded cap; the ceiling is derived from venue volatility |
+| `PERPS_LEVERAGE_VOL_MULTIPLIER` | `1.2` | How many 24h ranges of adverse move the position must survive |
+| `PERPS_LEVERAGE_MIN_VOLUME_USD` | `10000000` | 24h volume floor; below it leverage is scaled down |
+| `PERPS_MAX_NET_EXPOSURE_PCT` | `0.35` | Net-long we keep; the hedge trims only the excess above it |
+| `PERPS_HEDGE_LEVERAGE` / `_MAX` | `1` / `3` | Hedge leverage floor and hard ceiling (market model still caps it) |
+| `PERPS_STOP_LOSS_MARGIN_PCT` | `0.25` | Hard stop as a fraction of posted margin |
+| `PERPS_PROFIT_SHARE_PCT` | — | Share of realized profit above the floor the sleeve may deploy |
+
+## Secrets and GitHub safety
+
+This repo is safe to publish. It is built so **no secret can reach a commit**:
+
+- **Nothing secret is tracked.** `.env`, `wallet.key`, and the `.botstate/`
+  runtime directory (state, journals, logs) are all git-ignored. A `git ls-files`
+  check confirms no `.env`, `.pem`, keypair, or wallet JSON is under version
+  control.
+- **Only `.env.example` is tracked**, and it carries placeholder/empty values
+  only — no real key, no real address.
+- **The wallet is a local file path**, never pasted into code or config.
+- **The only optional key is BirdEye**, read from `BIRDEYE_API_KEY`; the bot
+  works without it via keyless GeckoTerminal, and the value lives only in your
+  local `.env`.
+
+Before pushing, verify with:
+
+```bash
+git ls-files | grep -iE '\.env$|\.pem$|wallet.*json|keypair'   # expect: nothing
+git grep -nE 'sk-|ghp_|AKIA|BEGIN .*PRIVATE KEY' -- . ':!package-lock.json'
+```
 
 ## Setup
 
@@ -170,7 +255,11 @@ The test suite covers the important invariants: asset conservation, the grid
 never deploying past its capital cap, the one-order-per-level rule, the
 take-profit sell never closing below the cost basis, the price sanity gate,
 re-anchor confirmation, the fee reserve, the no-replay rule after a restart,
-and the 24h window used by the dashboard header. Run it with `npm test`.
+the 24h window used by the dashboard header, and the perps sleeve's safety
+invariants — the stop always sitting inside liquidation, the hedge trimming only
+the excess above the exposure cap, and leverage staying bounded by the
+market-derived survival bound and failing safe at 1x when data is missing. Run
+it with `npm test`.
 
 ```bash
 npm install

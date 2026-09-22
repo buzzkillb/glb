@@ -1,5 +1,5 @@
 import type { GridConfig, DcaConfig, MemeSlotConfig, PerpSleeveConfig } from './config.js';
-import type { SmartLeverageView } from './perpStrategy.js';
+import type { LeverageBreakdown } from './perpStrategy.js';
 
 export type Side = 'BUY' | 'SELL';
 
@@ -280,11 +280,12 @@ export interface PerpsState {
   /** Configured hard leverage ceiling for the sleeve. */
   maxLeverage: number;
   /**
-   * Smart leverage working range derived from live volatility: floor (1x), the
-   * volatility-derived safe maximum, and the configured ceiling. This is the
-   * answer to "what leverage range can this use" — market-derived, not static.
+   * Smart leverage working range derived from live state — venue volatility
+   * (survival bound), our bag concentration, market direction, and market
+   * liquidity — plus the policy ceiling. Fully auditable: every penalty is
+   * exposed so the number is never a black box, and nothing is hardcoded.
    */
-  leverageRange: SmartLeverageView;
+  leverageRange: LeverageBreakdown;
   realizedPnlUsd: number;
   feesPaidUsd: number;
   open: {
