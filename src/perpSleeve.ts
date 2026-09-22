@@ -258,6 +258,7 @@ export class PerpSleeve {
             cashUsePct: p.cashUsePct,
             maxEquityPct: p.maxEquityPct,
             maxMarginUsd: p.maxMarginUsd,
+            usdcFloorUsd: p.usdcFloorUsd,
           },
           profit,
           this.ledger.snapshotLedger().outstandingMarginUsd
@@ -556,6 +557,7 @@ export class PerpSleeve {
             cashUsePct: p.cashUsePct,
             maxEquityPct: p.maxEquityPct,
             maxMarginUsd: p.maxMarginUsd,
+            usdcFloorUsd: p.usdcFloorUsd,
           },
           profit,
           led.outstandingMarginUsd

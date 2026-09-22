@@ -135,6 +135,19 @@ leverage results:
 | `PERPS_HEDGE_LEVERAGE` / `_MAX` | `1` / `3` | Hedge leverage floor and hard ceiling (market model still caps it) |
 | `PERPS_STOP_LOSS_MARGIN_PCT` | `0.25` | Hard stop as a fraction of posted margin |
 | `PERPS_PROFIT_SHARE_PCT` | — | Share of realized profit above the floor the sleeve may deploy |
+| `PERPS_USDC_FLOOR_USD` | `USDC_MIN_RESERVE` | Hard USDC floor the sleeve may never spend, so perps cannot drain the spot book's working cash |
+
+### What perps consumes (and what it never touches)
+
+Our hedge is a **short**, and at this venue a short posts **USDC** as margin —
+never SOL. So the SOL fee reserve the spot book keeps (so grid/DCA can always
+transact) is structurally untouched: closing returns USDC, and the round trip is
+USDC → USDC. A *long* (unused here) would post the market token instead.
+
+The real risk was the sleeve eating the spot book's *USDC*, since that is also
+what spot spends. That is closed off: `deployableSleeveUsd()` subtracts
+`PERPS_USDC_FLOOR_USD` (default: the spot `USDC_MIN_RESERVE`) before sizing, so
+only cash **above** the floor is spendable and cash below it deploys nothing.
 
 ## Secrets and GitHub safety
 

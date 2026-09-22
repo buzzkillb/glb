@@ -517,3 +517,63 @@ today it would still be ~5.5x.
 
 **Verdict:** leverage is now correctly wired and volatility-bounded end to end —
 `1x … 5x` today, auto-easing to 1x under stress. Dashboard shows the live range.
+
+---
+
+## 16. "Can perps use only the USDC bag?" — YES for margin, with one real gap now closed
+
+### The exposure we actually hedge is SOL, not USDC
+
+The sleeve's job is to trim our **spot SOL inventory** (the grid/DCA bag). So the
+question is not really which token funds it — it is which token the *risk* sits
+in, and that is SOL. Funding is a separate matter.
+
+### What a hedge/short actually consumes: USDC only
+
+At this venue collateral is **side-dependent**, verified live:
+
+| Position | Collateral posted | Leaves the wallet |
+|---|---|---|
+| short (our hedge) | **USDC** (quote) | USDC |
+| long (overlay, unused here) | market token (SOL) | SOL |
+
+Our hedge path is always a **short**, so **it posts USDC and never touches SOL.**
+That means the 1 SOL the spot book keeps for free — the fee reserve that keeps
+grid/DCA able to transact — is structurally untouched by perps. Perps cannot
+consume that SOL even in principle: a short does not post SOL.
+
+Closing a short returns **USDC** (`desiredMint: USDC`), so the round trip is
+USDC → USDC and the SOL inventory stays exactly where it is.
+
+### The one real gap: USDC, not SOL, was the thing that could be drained
+
+Perps posts USDC, and the spot grid/DCA also *spends* USDC. So the genuine risk
+was never the SOL reserve — it was the sleeve **eating the spot book's working
+USDC**. The old sizing used `freeCashUsd × cashUsePct`, i.e. 100% of liquid USDC
+when `cashUsePct = 1`. Nothing held any USDC back.
+
+That is now fixed with a hard floor. `deployableSleeveUsd()` subtracts a
+**USDC reserve** before sizing, and `PERPS_USDC_FLOOR_USD` defaults to the spot
+book's own `USDC_MIN_RESERVE`. Only cash **above** the floor is spendable:
+
+```
+spendableCash = max(0, freeCashUsd - usdcFloorUsd)
+fromCash      = spendableCash * cashUsePct
+```
+
+New tests assert the bound directly: at a $30 floor and $500 cash, the budget is
+capped at $470; at $25 cash (below the floor) the budget is **exactly 0** — the
+sleeve deploys nothing rather than dipping into the spot book's cash. Result:
+**145 tests, 0 fail.**
+
+### Net position
+
+- **USDC for margin: yes**, and now floored so spot always keeps working cash.
+- **SOL reserve: untouched by construction** — a short posts USDC, not SOL.
+- **Profit corridor unchanged:** the sleeve is still funded only by equity above
+  the untouchable principal floor. Base spot capital is never at risk.
+- **Set it explicitly if you want more headroom:** `PERPS_USDC_FLOOR_USD` (raise
+  to hold back more USDC; it can never be spent below this).
+
+**Verdict:** perps run on the USDC bag, never the SOL fee reserve, and can no
+longer drain the spot book's working USDC.

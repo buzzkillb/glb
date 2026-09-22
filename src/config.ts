@@ -180,6 +180,9 @@ export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   // leaving only the risk caps below (equity %) as the true ceiling.
   profitSharePct: 1.0,
   cashUsePct: 1.0,
+  // Default USDC floor for the static DEFAULT_PERPS_CONFIG shape (the env-loaded
+  // config overrides this with the live USDC_MIN_RESERVE value).
+  usdcFloorUsd: 30,
   // Fraction of the sleeve's OWN banked realized PnL (read live from the trade
   // tape) that is deployable. 0 disables the realized-PnL funding path.
   realizedProfitUsePct: 1.0,
@@ -263,6 +266,13 @@ export interface PerpSleeveConfig {
   hourlyBorrowPct: number;
   /** Absolute cap on sleeve margin as a fraction of equity (final safety ceiling). */
   maxEquityPct: number;
+  /**
+   * Hard USDC floor the sleeve may never spend. Perps posts USDC as margin, so
+   * without this the sleeve could drain the cash the spot grid/DCA needs to
+   * keep trading. Defaults to the spot `USDC_MIN_RESERVE` so the spot book's
+   * working cash is always protected. Raise it to hold back more.
+   */
+  usdcFloorUsd: number;
   /** Hard USD ceiling on margin. 0 = uncapped (deploy full computed profit). */
   maxMarginUsd: number;
   /**
@@ -456,6 +466,15 @@ export function loadConfig(): AppConfig {
         openFeePct: envNumber('PERPS_OPEN_FEE_PCT', 0.0006, 0, 0.1),
         hourlyBorrowPct: envNumber('PERPS_HOURLY_BORROW_PCT', 0.000006, 0, 0.01),
         maxEquityPct: envNumber('PERPS_MAX_EQUITY_PCT', 0.1, 0, 1),
+        // Never spend below this USDC amount: the spot grid/DCA keeps working.
+        // Defaults to the same floor the spot sizer uses, so enabling perps can
+        // not starve the spot book of its working cash.
+        usdcFloorUsd: envNumber(
+          'PERPS_USDC_FLOOR_USD',
+          envNumber('USDC_MIN_RESERVE', 30, 0, 1e9),
+          0,
+          1e9
+        ),
         maxMarginUsd: envNumber('PERPS_MAX_MARGIN_USD', 0, 0, 1e9),
         haltClosesOpen: envBool('PERPS_HALT_CLOSES_OPEN', false),
         // 0 = derive the ceiling from live volatility (no hardcoded leverage).

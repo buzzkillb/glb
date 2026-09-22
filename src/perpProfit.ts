@@ -160,6 +160,8 @@ export function deployableSleeveUsd(
     cashUsePct: number;
     maxEquityPct: number;
     maxMarginUsd: number;
+    /** Hard USDC amount the sleeve may never spend (spot working-cash floor). */
+    usdcFloorUsd?: number;
   },
   signal: ProfitSignal,
   /** Margin already committed to an open position; never deploy it twice. */
@@ -175,7 +177,10 @@ export function deployableSleeveUsd(
     realizedShare > 0
       ? Math.max(0, signal.lifetimeRealizedUsd) * realizedShare
       : Number.POSITIVE_INFINITY;
-  const fromCash = Math.max(0, signal.freeCashUsd) * clamp(cfg.cashUsePct, 0, 1);
+  // Hold back a hard USDC floor first: perps cannot touch the cash the spot
+  // grid/DCA needs to keep trading. Only cash ABOVE the floor is spendable.
+  const spendableCash = Math.max(0, signal.freeCashUsd - Math.max(0, cfg.usdcFloorUsd ?? 0));
+  const fromCash = spendableCash * clamp(cfg.cashUsePct, 0, 1);
   const equityCap = Math.max(0, signal.currentEquityUsd) * clamp(cfg.maxEquityPct, 0, 1);
   // maxMarginUsd <= 0 means "no USD ceiling": deploy the full computed profit,
   // bounded only by liquid cash and the equity-% safety cap.

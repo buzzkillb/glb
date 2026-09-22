@@ -191,3 +191,36 @@ test('a non-positive equity sample is never archived (boot-time 0 guard)', async
     process.env.BOT_STATE_DIR = prev;
   }
 });
+
+// Eight fills so the tape clears the confidence gate (ready=true); the floor
+// logic is what these tests are actually about.
+const EIGHT_FILLS = Array.from({ length: 8 }, (_, i) => ({ ts: NOW - DAY + i, realizedPnlUsd: 100 }));
+
+test('USDC floor protects the spot book: perps can never spend below it', () => {
+  // The spot grid/DCA needs USDC to keep trading. With a $30 floor, a $500 cash
+  // balance yields only $470 of spendable margin even at cashUsePct=1.
+  seed([{ ts: NOW - DAY, equityUsd: 10_000 }], EIGHT_FILLS);
+  const s = detectProfit('live', 11_000, 500);
+  assert.equal(s.freeCashUsd, 500);
+  const cfg = { profitSharePct: 1, realizedProfitUsePct: 1, cashUsePct: 1, maxEquityPct: 1, maxMarginUsd: 0, usdcFloorUsd: 30 };
+  // Profit ($1000) and realized ($200) exceed cash-after-floor ($470), so the
+  // cash term binds at exactly 470 — proof the floor is subtracted first.
+  assert.equal(deployableSleeveUsd(cfg, s, 0), 470);
+});
+
+test('USDC floor is a hard stop: cash at/below the floor deploys nothing', () => {
+  seed([{ ts: NOW - DAY, equityUsd: 10_000 }], EIGHT_FILLS);
+  const s = detectProfit('live', 20_000, 25); // huge profit, but only $25 cash
+  const cfg = { profitSharePct: 1, realizedProfitUsePct: 1, cashUsePct: 1, maxEquityPct: 1, maxMarginUsd: 0, usdcFloorUsd: 30 };
+  // Profit is large but cash ($25) is below the $30 floor, so NOTHING deploys.
+  assert.equal(deployableSleeveUsd(cfg, s, 0), 0);
+});
+
+test('USDC floor defaults to safe when unset (no accidental spot drain)', () => {
+  seed([{ ts: NOW - DAY, equityUsd: 10_000 }], EIGHT_FILLS);
+  const s = detectProfit('live', 11_000, 500);
+  // No usdcFloorUsd field present: treated as 0 reduction (config always sets it
+  // in production), but it must not NaN or crash the budget path.
+  const cfg = { profitSharePct: 1, realizedProfitUsePct: 1, cashUsePct: 1, maxEquityPct: 1, maxMarginUsd: 0 };
+  assert.equal(deployableSleeveUsd(cfg, s, 0), 500);
+});
