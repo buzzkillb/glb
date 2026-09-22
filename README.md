@@ -70,6 +70,26 @@ uses Jupiter Perps. It is deliberately a *satellite*, not a second strategy:
   requirement, and our own stop is asserted to sit far inside liquidation before
   the position is ever sent. A hard stop closes the position first.
 
+### Live execution path
+
+Jupiter Perps is not a submit-to-the-RPC venue. A build reply carries
+`requireKeeperSignature: true`, and the **keeper must co-sign and land the
+transaction**. The broker therefore signs the user's side locally and then POSTs
+the signed bytes to `/transaction/execute`, which returns the real on-chain txid;
+the broker confirms that txid before it books anything. This is verified live by
+`scripts/perpBrokerAcceptance.ts`, which opens and fully closes a real position
+through the bot's own `PerpBroker`.
+
+Two venue rules the broker enforces, both verified against the live API rather
+than assumed:
+
+- **Collateral is side-dependent.** A *short* posts USDC as margin; a *long* must
+  post the market token itself. The broker picks the mint by side and converts
+  the USD size into that token's raw base units.
+- **Leverage has a hard floor of 1.1x.** The venue rejects anything lower,
+  including exactly 1x, so the fail-safe and the derived number are both clamped
+  to a buildable value (`PERP_MIN_LEVERAGE`).
+
 There are two intents, and both are **trims**, never a full conversion:
 
 - **Hedge (Tier 2).** The spot book's net-long is the strategy's directional
@@ -130,12 +150,16 @@ This repo is safe to publish. It is built so **no secret can reach a commit**:
 - **The only optional key is BirdEye**, read from `BIRDEYE_API_KEY`; the bot
   works without it via keyless GeckoTerminal, and the value lives only in your
   local `.env`.
+- **The base58 strings in the code are public mint addresses**, not secrets
+  (e.g. wrapped SOL, USDC). No private key, API secret, or token ever appears in
+  source or config.
 
 Before pushing, verify with:
 
 ```bash
 git ls-files | grep -iE '\.env$|\.pem$|wallet.*json|keypair'   # expect: nothing
 git grep -nE 'sk-|ghp_|AKIA|BEGIN .*PRIVATE KEY' -- . ':!package-lock.json'
+git grep -nE '_KEY=|_SECRET=|_TOKEN=' -- .env.example           # placeholders only
 ```
 
 ## Setup
