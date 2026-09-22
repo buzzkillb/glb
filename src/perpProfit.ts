@@ -11,10 +11,10 @@ import { readEquityArchive, readJournal, type EquitySample } from './journal.js'
  *   2. the trade journal           (`.botstate/trades-*.jsonl`) — banked realized
  *      PnL per fill.
  *
- * The baseline is not a magic number: it is the FIRST equity sample we ever
- * recorded. Profit above that baseline is genuinely earned money. Because the
- * baseline comes from the archive it self-adjusts over time — as the record
- * grows the baseline stays anchored to the origin, and the eligible amount
+ * The baseline is not a magic number: it is the equity at the true trading
+ * origin — the earliest archived sample with any PnL banked before that sample
+ * added back, so profit earned before the archive began is still counted.
+ * Profit above that baseline is genuinely earned money, and the eligible amount
  * tracks whatever the account has actually made.
  *
  * The sleeve can only ever deploy profit, and only the liquid (USDC) portion of
@@ -77,15 +77,29 @@ export function detectProfit(
     .filter((t) => t.ts >= windowStart)
     .reduce((s, t) => s + (t.realizedPnlUsd ?? 0), 0);
 
-  // Baseline = earliest point in our own record. Prefer the equity archive
-  // because it is net-worth truth; fall back to the journal's first fill.
+  // Baseline = equity at the ORIGIN of trading, not merely the first day of our
+  // archive. The equity archive only began on 2026-09-20, but fills were already
+  // being banked before that (trading started earlier). Realized PnL earned
+  // BEFORE the archive's first sample is already baked into that sample's equity
+  // value, so using it raw as the baseline silently erases every dollar banked
+  // before the archive existed. Reconstruct the true starting capital instead:
+  //
+  //   tradingStartEquity = archiveOriginEquity - realizedBankedBeforeOrigin
+  //
+  // This makes the baseline the real pre-trading net worth, so eligible profit
+  // reflects ALL banked PnL — exactly what "use the entire PnL" requires. Losses
+  // banked before the origin raise the baseline (conservative), and the result
+  // is floored at 0.
   let baselineEquityUsd: number | null = null;
   let baselineTs: number | null = null;
   let baselineSource: ProfitSignal['baselineSource'] = 'none';
 
   const first = earliest(archive);
   if (first) {
-    baselineEquityUsd = first.equityUsd;
+    const bankedBefore = tape
+      .filter((t) => t.ts < first.ts)
+      .reduce((s, t) => s + (t.realizedPnlUsd ?? 0), 0);
+    baselineEquityUsd = Math.max(0, first.equityUsd - bankedBefore);
     baselineTs = first.ts;
     baselineSource = 'archive';
   } else if (tape.length) {
@@ -105,7 +119,7 @@ export function detectProfit(
   const note = !baselineEquityUsd
     ? 'no record yet — baseline will anchor on the first equity sample'
     : baselineSource === 'archive'
-      ? `baseline anchored to first archived equity sample (${new Date(baselineTs!).toISOString().slice(0, 10)})`
+      ? `baseline reconstructed to trading origin (archive first sample ${new Date(baselineTs!).toISOString().slice(0, 10)} minus pre-origin banked PnL)`
       : 'baseline approximated from first journal fill';
 
   return {
@@ -147,7 +161,9 @@ export function deployableSleeveUsd(
     maxEquityPct: number;
     maxMarginUsd: number;
   },
-  signal: ProfitSignal
+  signal: ProfitSignal,
+  /** Margin already committed to an open position; never deploy it twice. */
+  outstandingMarginUsd = 0
 ): number {
   if (!signal.ready) return 0;
   if (signal.newProfitUsd <= 0) return 0;
@@ -164,7 +180,11 @@ export function deployableSleeveUsd(
   // maxMarginUsd <= 0 means "no USD ceiling": deploy the full computed profit,
   // bounded only by liquid cash and the equity-% safety cap.
   const usdCeiling = cfg.maxMarginUsd > 0 ? cfg.maxMarginUsd : Number.POSITIVE_INFINITY;
-  const budget = Math.min(fromProfit, fromRealized, fromCash, equityCap, usdCeiling);
+  const grossCeiling = Math.min(fromProfit, fromRealized, fromCash, equityCap, usdCeiling);
+  // Subtract margin already at work so the same profit cannot be deployed twice
+  // (this is the invariant `computeSleeveBudget` already enforced; the live path
+  // must agree with it or a re-entry could silently over-deploy).
+  const budget = Math.max(0, grossCeiling - Math.max(0, outstandingMarginUsd));
   return budget > 0 && Number.isFinite(budget) ? budget : 0;
 }
 

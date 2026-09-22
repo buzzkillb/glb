@@ -202,6 +202,8 @@ export class PerpSleeve {
     // Deployable amount comes from the LIVE signal (net-worth gain since our
     // baseline, capped by banked realized PnL and liquid cash), then the
     // strategy decides WHERE to deploy it. Budget 0 => no action, always safe.
+    // Outstanding margin is subtracted so already-deployed profit is never
+    // counted twice (the live and stored budget paths must agree).
     const deployable = profit
       ? deployableSleeveUsd(
           {
@@ -211,7 +213,8 @@ export class PerpSleeve {
             maxEquityPct: p.maxEquityPct,
             maxMarginUsd: p.maxMarginUsd,
           },
-          profit
+          profit,
+          this.ledger.snapshotLedger().outstandingMarginUsd
         )
       : 0;
 
@@ -492,7 +495,9 @@ export class PerpSleeve {
     const mark = this.feed.lastPrice();
     const gridLong = mark > 0 ? this.gridNetLongUsd(mark) : 0;
     const eligible = Math.max(0, equity - led.principalFloorUsd);
-    // Deployable budget comes from the LIVE profit signal, not a stored floor.
+    // Deployable budget comes from the LIVE profit signal, not a stored floor,
+    // net of margin already at work so the displayed number matches what can
+    // actually be committed now.
     const budget = profit
       ? deployableSleeveUsd(
           {
@@ -502,7 +507,8 @@ export class PerpSleeve {
             maxEquityPct: p.maxEquityPct,
             maxMarginUsd: p.maxMarginUsd,
           },
-          profit
+          profit,
+          led.outstandingMarginUsd
         )
       : 0;
     const pos = led.position;
@@ -520,7 +526,14 @@ export class PerpSleeve {
       markPrice: mark,
       markHealthy: this.markHealthy,
       feedRejectReason: this.feedReject,
-      principalFloorUsd: led.principalFloorUsd,
+      // The real untouchable floor is the dynamic baseline (trading-origin
+      // equity). The stored ledger floor is only populated when explicitly
+      // configured, so fall back to the live baseline — otherwise the tab would
+      // show "$0.00 floor" while the copy claims funding is gated above it.
+      principalFloorUsd:
+        led.principalFloorUsd > 0
+          ? led.principalFloorUsd
+          : profit?.baselineEquityUsd ?? 0,
       peakEquityUsd: led.peakEquityUsd,
       outstandingMarginUsd: led.outstandingMarginUsd,
       eligibleProfitUsd: profit ? profit.newProfitUsd : eligible,

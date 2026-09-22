@@ -135,3 +135,59 @@ test('realized-profit path can be disabled with 0 and never goes negative', () =
   );
   assert.ok(b >= 0);
 });
+
+test('outstanding margin is subtracted so profit is never deployed twice', () => {
+  // Full-profit config: profit above baseline is the only binding term here.
+  const cfg = { profitSharePct: 1, realizedProfitUsePct: 1, cashUsePct: 1, maxEquityPct: 0.1, maxMarginUsd: 0 };
+  seed([{ ts: NOW - 10 * DAY, equityUsd: 10_000 }, { ts: NOW, equityUsd: 10_500 }], [
+    { ts: NOW - 1 * DAY, realizedPnlUsd: 400 },
+  ]);
+  const s = detectProfit('live', 10_500, 9_000);
+  // Profit is $500 but banked realized PnL is only $400, which caps it (you may
+  // only risk money actually banked). With no position open, $400 is deployable.
+  assert.equal(deployableSleeveUsd(cfg, s, 0), 400);
+  // $300 already committed -> only the remaining $100 may be deployed.
+  assert.equal(deployableSleeveUsd(cfg, s, 300), 100);
+  // More margin at work than the ceiling -> exactly 0, never negative.
+  assert.equal(deployableSleeveUsd(cfg, s, 800), 0);
+});
+
+test('profit banked before the archive began is NOT erased by the baseline', () => {
+  // Trading started before the equity archive existed. $300 was banked pre-archive
+  // and is already baked into the first archived equity sample (10_300). The
+  // second sample (10_800) is net worth after those gains plus another $200.
+  // Using the raw first sample as baseline would show only $500 of profit and
+  // silently drop the $300. The true trading origin is 10_300 - 300 = 10_000,
+  // so eligible profit must be 10_800 - 10_000 = 800.
+  seed(
+    [{ ts: NOW - 5 * DAY, equityUsd: 10_300 }, { ts: NOW, equityUsd: 10_800 }],
+    [
+      { ts: NOW - 20 * DAY, realizedPnlUsd: 300 }, // pre-archive, must still count
+      { ts: NOW - 2 * DAY, realizedPnlUsd: 200 },
+    ]
+  );
+  const s = detectProfit('live', 10_800, 9_000);
+  assert.equal(s.baselineEquityUsd, 10_000, 'baseline reconstructed to trading origin');
+  assert.equal(s.newProfitUsd, 800, 'all banked profit is credited, incl. pre-archive');
+  // Full-PnL config: the realized ceiling is 500, below the 800 equity gain.
+  const cfg = { profitSharePct: 1, realizedProfitUsePct: 1, cashUsePct: 1, maxEquityPct: 0.1, maxMarginUsd: 0 };
+  assert.equal(deployableSleeveUsd(cfg, s, 0), 500);
+});
+
+test('a non-positive equity sample is never archived (boot-time 0 guard)', async () => {
+  // The live path must reject a transient 0 equity (chain not synced yet) so a
+  // fake crash can never become the profit baseline.
+  const fresh = mkdtempSync(path.join(tmpdir(), 'perps-archive-'));
+  const prev = process.env.BOT_STATE_DIR;
+  process.env.BOT_STATE_DIR = fresh;
+  try {
+    const { appendEquityArchive, readEquityArchive } = await import('../src/journal.js');
+    appendEquityArchive('live', { ts: NOW - 1000, equityUsd: 0 });
+    appendEquityArchive('live', { ts: NOW, equityUsd: 10_500 });
+    const got = readEquityArchive('live');
+    assert.equal(got.length, 1, 'only the real sample is archived');
+    assert.equal(got[0].equityUsd, 10_500);
+  } finally {
+    process.env.BOT_STATE_DIR = prev;
+  }
+});

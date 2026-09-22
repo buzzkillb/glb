@@ -132,7 +132,12 @@ export function seedJournalFromLedger(mode: 'paper' | 'live', trades: Trade[]): 
 
 /** Append a coarse equity sample to the forever archive. Best-effort. */
 export function appendEquityArchive(mode: 'paper' | 'live', sample: EquitySample): void {
-  if (!(sample.equityUsd >= 0) || !(sample.ts > 0)) return;
+  // Reject a non-positive equity sample: at boot the chain balances have not
+  // synced yet, so a transient 0 would be archived as a fake net-worth crash and
+  // could later be picked as the profit baseline (or show a crash on the chart).
+  // A real account with 0 equity is indistinguishable from "not loaded yet", so
+  // it is safer to skip than to persist a wrong sample.
+  if (!(sample.equityUsd > 0) || !(sample.ts > 0)) return;
   try {
     ensureDir();
     appendFileSync(equityArchivePath(mode), JSON.stringify(sample) + '\n', {
