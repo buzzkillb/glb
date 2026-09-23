@@ -742,6 +742,10 @@ export class PerpSleeve {
         pos && pos.intent === 'hedge' && gridLong > 0
           ? Math.min(1, (pos.collateralUsd * pos.leverage) / gridLong)
           : 0,
+      /** Take-profit share of margin that BANKS the hedge (0 = hedge never takes profit). */
+      hedgeTakeProfitPct: Math.max(0, p.hedgeTakeProfitPct ?? 0),
+      /** Minutes the sleeve waits after a close before re-arming (fee-churn guard). */
+      hedgeRearmCooldownMinutes: Math.max(0, p.hedgeRearmCooldownMinutes ?? 0),
       /** Cap we allow the spot book to stay net-long (fraction of equity). */
       maxNetExposurePct: Math.max(0, Math.min(1, p.maxNetExposurePct ?? 0)),
       /** Hard USDC floor the sleeve may never spend (keeps spot's cash working). */

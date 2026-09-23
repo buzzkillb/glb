@@ -261,6 +261,10 @@ export interface PerpsState {
   exposurePct: number;
   hedgeActive: boolean;
   hedgeCoveragePct: number;
+  /** Take-profit share of posted margin that banks the hedge (0 = disabled). */
+  hedgeTakeProfitPct: number;
+  /** Minutes to wait after a close before the sleeve re-arms (0 = disabled). */
+  hedgeRearmCooldownMinutes: number;
   /**
    * Cap we allow the spot book to stay net-long, as a fraction of equity. A
    * hedge trims only the EXCESS above this — we do NOT delta-neutral the whole
