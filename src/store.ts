@@ -67,6 +67,8 @@ function emptyPerpsState(): import('./types.js').PerpsState {
     hedgeActive: false,
     hedgeCoveragePct: 0,
     hedgeTakeProfitPct: 0,
+    hedgeTakeProfitMaxPct: 0,
+    hedgeTakeProfitPlan: null,
     hedgeRearmCooldownMinutes: 0,
     maxNetExposurePct: 0,
     usdcFloorUsd: 0,

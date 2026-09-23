@@ -235,10 +235,14 @@ export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   maxNetExposurePct: 0.35,
   hedgeTriggerPct: 0.15,
   stopLossMarginPct: 0.25,
-  // Bank the hedge at +25% of posted margin (symmetric with the stop) so the
-  // short actively harvests the downside instead of sitting flat, then re-arm
-  // after a cooldown so it cannot churn fees re-opening on the same mark.
+  // DYNAMIC hedge take-profit. The floor (25% of margin) is where we bank the
+  // moment the downside move is spent (momentum flattens or the move covers the
+  // 24h range) — never give a banked gain back to a bounce. The ceiling lets a
+  // winning short RIDE an intact downtrend for up to 60% of margin, so the
+  // target is derived from live volatility/momentum, not a fixed number.
   hedgeTakeProfitPct: 0.25,
+  hedgeTakeProfitMaxPct: 0.6,
+  hedgeTakeProfitVolFactor: 1,
   hedgeRearmCooldownMinutes: 30,
   maxLossUsd: 0,
   overlayEnabled: false,
@@ -342,12 +346,24 @@ export interface PerpSleeveConfig {
   /** Stop is placed at this fraction of margin loss — must sit INSIDE liquidation. */
   stopLossMarginPct: number;
   /**
-   * Take-profit share of posted margin for a hedge short (e.g. 0.25 = bank when
-   * the hedge has made 25% of its margin). 0 disables, leaving the hedge exit
-   * purely to the stop and the exposure unwind. This is what makes the sleeve
-   * ACTUALLY bank money on the downside instead of sitting flat forever.
+   * MINIMUM take-profit share of posted margin for a hedge short (the floor).
+   * The live target is dynamic (see planHedgeTakeProfit): it rides a real
+   * downtrend for more, and collapses to this floor the moment the move
+   * exhausts so we bank before a bounce gives the gain back. 0 disables.
    */
   hedgeTakeProfitPct?: number;
+  /**
+   * Ceiling on the dynamic take-profit share of margin — caps how far a winning
+   * short may run while the downtrend stays intact. Defaults to the floor (a
+   * fixed target) when unset. Must be >= hedgeTakeProfitPct.
+   */
+  hedgeTakeProfitMaxPct?: number;
+  /**
+   * Exhaustion sensitivity. The favourable move is judged "spent" once it spans
+   * this multiple of the venue's 24h range. Higher = hold longer, lower = bank
+   * sooner. Optional so hand-built test configs stay valid.
+   */
+  hedgeTakeProfitVolFactor?: number;
   /**
    * Minutes to wait after a hedge take-profit/unwind before re-arming, so the
    * sleeve cannot churn venue fees re-entering at the same mark.
@@ -539,6 +555,8 @@ export function loadConfig(): AppConfig {
         hedgeTriggerPct: envNumber('PERPS_HEDGE_TRIGGER_PCT', 0.15, 0, 1),
         stopLossMarginPct: envNumber('PERPS_STOP_LOSS_MARGIN_PCT', 0.25, 0.01, 0.99),
         hedgeTakeProfitPct: envNumber('PERPS_HEDGE_TAKE_PROFIT_PCT', 0.25, 0, 100),
+        hedgeTakeProfitMaxPct: envNumber('PERPS_HEDGE_TAKE_PROFIT_MAX_PCT', 0.6, 0, 100),
+        hedgeTakeProfitVolFactor: envNumber('PERPS_HEDGE_TAKE_PROFIT_VOL_FACTOR', 1, 0.05, 100),
         hedgeRearmCooldownMinutes: envNumber('PERPS_HEDGE_REARM_COOLDOWN_MINUTES', 30, 0, 10080),
         maxLossUsd: envNumber('PERPS_MAX_LOSS_USD', 0, 0, 1e9),
         overlayEnabled: envBool('PERPS_OVERLAY_ENABLED', false),

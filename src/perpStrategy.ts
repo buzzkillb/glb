@@ -69,12 +69,16 @@ export interface PerpSleeveConfig {
   /** Stop is placed at this fraction of margin loss — must sit INSIDE liquidation. */
   stopLossMarginPct: number;
   /**
-   * Take-profit share of posted margin for a hedge short (e.g. 0.25 = bank when
-   * the hedge has made 25% of its margin). 0 disables, leaving the hedge exit
-   * purely to the stop and the exposure unwind. This is what makes the sleeve
-   * ACTUALLY bank money on the downside instead of sitting flat forever.
+   * MINIMUM take-profit share of posted margin for a hedge short (the floor).
+   * The live target is dynamic (see planHedgeTakeProfit): it rides a real
+   * downtrend for more, and collapses to this floor the moment the move
+   * exhausts so we bank before a bounce gives the gain back. 0 disables.
    */
   hedgeTakeProfitPct?: number;
+  /** Ceiling on the dynamic take-profit share of margin (defaults to the floor). */
+  hedgeTakeProfitMaxPct?: number;
+  /** Exhaustion sensitivity vs the venue 24h range (default 1). */
+  hedgeTakeProfitVolFactor?: number;
   /**
    * Minutes to wait after a hedge take-profit/unwind before re-arming. Without
    * it, re-opening at the same mark could immediately re-trigger the take-profit
@@ -523,6 +527,104 @@ export function hedgeTakeProfitHit(
   const tp = hedgeTakeProfitPct ?? 0;
   if (!(tp > 0) || !(collateralUsd > 0)) return false;
   return netPnlUsd >= collateralUsd * tp;
+}
+
+/** Live state the dynamic hedge take-profit reacts to. */
+export interface HedgeProfitContext {
+  /** Current unrealized PnL (USD) on the short. */
+  netPnlUsd: number;
+  /** Posted margin (USD) — the scale the target is expressed in. */
+  collateralUsd: number;
+  /** Entry price of the short. */
+  entryPriceUsd: number;
+  /** Current mark price — used to size the favourable price move honestly. */
+  markPriceUsd: number;
+  /** Whether the hedge is in profit right now (netPnlUsd > 0). */
+  profitable: boolean;
+  /** Venue 24h price range as a fraction of price (volatility). */
+  vol24RangePct?: number;
+  /** Live 24h price change as a fraction (negative = market falling). */
+  momentum24HPct?: number;
+  /** Minimum bank share of margin (floor). <= 0 disables. */
+  minTakeProfitPct?: number;
+  /** Maximum bank share of margin (ceiling). Defaults to min when unset. */
+  maxTakeProfitPct?: number;
+  /** Exhaustion sensitivity vs the 24h range. Default 1. */
+  volFactor?: number;
+}
+
+/**
+ * DYNAMIC HEDGE TAKE-PROFIT — the short is trying to make money on the
+ * DOWNSIDE, so its exit must be as adaptive as the entry, not a fixed percent.
+ *
+ * When the market is falling, the correct behaviour is to RIDE the winning
+ * short to a target proportional to who is participating (the venue's live
+ * volatility), and to give the target back (collapse to the floor) the moment
+ * two things tell us the move is exhausted:
+ *   - the favourable move has already spanned the 24h range (a full traversal),
+ *   - or the 24h momentum has flipped to flat/up (the downtrend is over).
+ *
+ * Once exhaustion is flagged we BANK NOW: holding further only invites a bounce
+ * that hands the gain back. Every number is derived from live state, and the
+ * floor/ceiling are configuration — never a hardcoded magic result.
+ */
+export function planHedgeTakeProfit(ctx: HedgeProfitContext): {
+  /** Share of margin that BANKS the short right now. */
+  targetPct: number;
+  /** Margin PnL (USD) at which banking fires. */
+  targetUsd: number;
+  /** True when the move is judged spent and we should bank now. */
+  exhausted: boolean;
+  /** True when the current gain has already reached the target. */
+  fired: boolean;
+  reason: string;
+} {
+  const floor = Math.max(0, ctx.minTakeProfitPct ?? 0);
+  const ceil = Math.max(floor, ctx.maxTakeProfitPct ?? floor);
+  const vol = Math.max(0, ctx.vol24RangePct ?? 0);
+  const mom = ctx.momentum24HPct ?? 0;
+  const volFactor = Math.max(0.05, ctx.volFactor ?? 1);
+
+  if (!(floor > 0)) {
+    return {
+      targetPct: 0,
+      targetUsd: 0,
+      exhausted: false,
+      fired: false,
+      reason: 'take-profit disabled',
+    };
+  }
+
+  // Favourable PRICE move so far, as a fraction of entry (a short gains on a
+  // fall). This is the honest "how far has the trade run" measure — distinct
+  // from the margin return, which is inflated by leverage.
+  const favourableMovePct =
+    ctx.profitable && ctx.entryPriceUsd > 0 && ctx.markPriceUsd > 0
+      ? Math.max(0, (ctx.entryPriceUsd - ctx.markPriceUsd) / ctx.entryPriceUsd)
+      : 0;
+
+  // Exhaustion: a full 24h-range traversal in our favour, or momentum no longer
+  // negative. Either means the downward move is spent — bank before a bounce.
+  const exhausted =
+    (vol > 0 && favourableMovePct >= vol * volFactor) || (ctx.profitable && mom >= 0);
+
+  // Target: ride the trend toward the ceiling while it is intact, else the floor.
+  const ride = Math.min(ceil, floor + Math.max(0, -mom) * volFactor * 2);
+  const targetPct = exhausted ? floor : Math.max(floor, Math.min(ceil, ride));
+  const targetUsd = ctx.collateralUsd * targetPct;
+  const fired = ctx.profitable && ctx.netPnlUsd >= targetUsd;
+
+  return {
+    targetPct,
+    targetUsd,
+    exhausted,
+    fired,
+    reason: fired
+      ? exhausted
+        ? `banking: move exhausted (24h ${(mom * 100).toFixed(1)}%, range ${(vol * 100).toFixed(1)}%) at ${(targetPct * 100).toFixed(0)}% margin`
+        : `banking: rode downtrend to ${(targetPct * 100).toFixed(0)}% margin`
+      : `holding: ${(targetPct * 100).toFixed(0)}% target (${exhausted ? 'exhausted' : 'trend intact'}), net ${ctx.netPnlUsd.toFixed(2)} USD`,
+  };
 }
 
 /**

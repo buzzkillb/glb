@@ -261,8 +261,23 @@ export interface PerpsState {
   exposurePct: number;
   hedgeActive: boolean;
   hedgeCoveragePct: number;
-  /** Take-profit share of posted margin that banks the hedge (0 = disabled). */
+  /** Floor share of margin that banks the hedge (0 = disabled). */
   hedgeTakeProfitPct: number;
+  /** Ceiling the dynamic target may ride to while a downtrend stays intact. */
+  hedgeTakeProfitMaxPct: number;
+  /**
+   * LIVE dynamic take-profit plan for the open hedge — recomputed each tick from
+   * venue volatility and momentum. Exposes the target share/USD, whether the
+   * move is judged exhausted, and whether banking has fired, so the number is
+   * never a black box. Null when no hedge is open.
+   */
+  hedgeTakeProfitPlan: {
+    targetPct: number;
+    targetUsd: number;
+    exhausted: boolean;
+    fired: boolean;
+    reason: string;
+  } | null;
   /** Minutes to wait after a close before the sleeve re-arms (0 = disabled). */
   hedgeRearmCooldownMinutes: number;
   /**

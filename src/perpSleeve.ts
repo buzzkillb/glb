@@ -8,6 +8,7 @@ import {
   borrowAccrualUsd,
   decideSleeveAction,
   hedgeTakeProfitHit,
+  planHedgeTakeProfit,
   perpUnrealizedPnlUsd,
   rearmCooldownElapsed,
   smartLeverageView,
@@ -339,23 +340,40 @@ export class PerpSleeve {
       return;
     }
 
-    // Hedge take-profit: BANK the gain once the short has earned enough of its
-    // posted margin, then stand down. Without this the hedge could only ever
-    // wait for the margin stop or an exposure unwind — it would protect but
-    // never actually realise a profit, which defeats the point of the sleeve.
-    if (pos.intent === 'hedge' && hedgeTakeProfitHit(netPnl, pos.collateralUsd, p.hedgeTakeProfitPct)) {
-      const tpUsd = pos.collateralUsd * (p.hedgeTakeProfitPct as number);
-      const fee = pos.collateralUsd * p.openFeePct * pos.leverage;
-      const ok = await this.settleClose(
-        pos,
-        notional,
-        mark,
-        netPnl,
-        fee,
-        `hedge take-profit: net ${netPnl.toFixed(2)} USD (carry ${borrowUsd.toFixed(3)}) >= ${tpUsd.toFixed(2)}`
-      );
-      if (ok) this.lastDecision = `closed hedge take-profit (${netPnl.toFixed(2)} USD)`;
-      return;
+    // Hedge take-profit: BANK the gain once the DYNAMIC target says the
+    // downside move is spent or has paid enough of the posted margin, then
+    // stand down. The target is derived from LIVE volatility and momentum each
+    // tick (planHedgeTakeProfit): a winning short rides a real downtrend for
+    // more, and collapses to the configured floor the moment momentum flattens
+    // or the move has already covered the 24h range — banking before a bounce
+    // hands the gain back. Without this the hedge could only ever wait for the
+    // stop or an exposure unwind, protecting but never realising a profit.
+    if (pos.intent === 'hedge') {
+      const plan = planHedgeTakeProfit({
+        netPnlUsd: netPnl,
+        collateralUsd: pos.collateralUsd,
+        entryPriceUsd: pos.entryPriceUsd,
+        markPriceUsd: mark,
+        profitable: netPnl > 0,
+        vol24RangePct: inputs.vol24RangePct,
+        momentum24HPct: inputs.momentum24HPct,
+        minTakeProfitPct: p.hedgeTakeProfitPct,
+        maxTakeProfitPct: p.hedgeTakeProfitMaxPct,
+        volFactor: p.hedgeTakeProfitVolFactor,
+      });
+      if (plan.fired) {
+        const fee = pos.collateralUsd * p.openFeePct * pos.leverage;
+        const ok = await this.settleClose(
+          pos,
+          notional,
+          mark,
+          netPnl,
+          fee,
+          `hedge take-profit: ${plan.reason} (carry ${borrowUsd.toFixed(3)})`
+        );
+        if (ok) this.lastDecision = `closed hedge take-profit (${netPnl.toFixed(2)} USD; ${plan.exhausted ? 'exhausted' : 'trend-ride'} target ${(plan.targetPct * 100).toFixed(0)}%)`;
+        return;
+      }
     }
 
     // Hedge unwinds itself once grid exposure is back below the trigger.
@@ -742,8 +760,42 @@ export class PerpSleeve {
         pos && pos.intent === 'hedge' && gridLong > 0
           ? Math.min(1, (pos.collateralUsd * pos.leverage) / gridLong)
           : 0,
-      /** Take-profit share of margin that BANKS the hedge (0 = hedge never takes profit). */
+      /** Floor share of margin that banks the hedge (0 = hedge never takes profit). */
       hedgeTakeProfitPct: Math.max(0, p.hedgeTakeProfitPct ?? 0),
+      /** Ceiling the dynamic target may ride to while the downtrend holds. */
+      hedgeTakeProfitMaxPct: Math.max(0, p.hedgeTakeProfitMaxPct ?? p.hedgeTakeProfitPct ?? 0),
+      /**
+       * LIVE dynamic take-profit plan for the open hedge, recomputed from venue
+       * volatility/momentum. Shows exactly when and at what level the sleeve
+       * will bank, so the operator never has to guess at the exit.
+       */
+      hedgeTakeProfitPlan: (() => {
+        if (!pos || pos.intent !== 'hedge') return null;
+        const m = this.feed.mark();
+        const px = this.feed.lastPrice();
+        if (!(px > 0)) return null;
+        const notionalUsd = pos.collateralUsd * pos.leverage;
+        const gross = perpUnrealizedPnlUsd(pos.side, pos.entryPriceUsd, px, notionalUsd);
+        const hours = Math.max(0, (Date.now() - pos.openedAt) / 3_600_000);
+        const carry = borrowAccrualUsd(notionalUsd, p.hourlyBorrowPct, hours);
+        const net = gross - carry;
+        return planHedgeTakeProfit({
+          netPnlUsd: net,
+          collateralUsd: pos.collateralUsd,
+          entryPriceUsd: pos.entryPriceUsd,
+          markPriceUsd: px,
+          profitable: net > 0,
+          vol24RangePct:
+            m && m.price > 0 && m.priceHigh24H > 0 && m.priceLow24H > 0
+              ? (m.priceHigh24H - m.priceLow24H) / m.price
+              : 0,
+          momentum24HPct:
+            m && m.price > 0 ? Math.max(-1, Math.min(1, m.priceChange24H / m.price)) : 0,
+          minTakeProfitPct: p.hedgeTakeProfitPct,
+          maxTakeProfitPct: p.hedgeTakeProfitMaxPct,
+          volFactor: p.hedgeTakeProfitVolFactor,
+        });
+      })(),
       /** Minutes the sleeve waits after a close before re-arming (fee-churn guard). */
       hedgeRearmCooldownMinutes: Math.max(0, p.hedgeRearmCooldownMinutes ?? 0),
       /** Cap we allow the spot book to stay net-long (fraction of equity). */
