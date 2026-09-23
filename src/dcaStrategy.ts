@@ -171,11 +171,23 @@ export class DcaStrategy {
       const buys = (s.buys ?? 0) + 1; // this buy is the `buys+1`th
       const progress = Math.min(1, buys / Math.max(1, d.vaHorizonBuys));
       const targetQty = d.vaTargetSol * progress;
-      const pos = this.store.getPosition(
-        this.cfg.strategies.grid.baseAsset,
-        this.cfg.strategies.grid.quoteAsset
-      );
-      const heldQty = pos && pos.baseQty > 0 ? pos.baseQty : 0;
+      // H3: value-averaging must track the DCA SUB-BOOK, not the commingled
+      // aggregate. Grid buys inflate the aggregate position, so measuring VA
+      // against it makes DCA think it is already past its SOL target and
+      // permanently buy only the floor increment. Ring-fenced likes its
+      // take-profit sibling: once any book exists the dca book is authoritative
+      // even when empty; the aggregate fallback applies only to legacy state.
+      let heldQty = 0;
+      const book = this.store.strategies.dca.subBook;
+      if (book || this.store.strategies.grid.subBook) {
+        heldQty = book?.baseQty ?? 0;
+      } else {
+        const pos = this.store.getPosition(
+          this.cfg.strategies.grid.baseAsset,
+          this.cfg.strategies.grid.quoteAsset
+        );
+        heldQty = pos && pos.baseQty > 0 ? pos.baseQty : 0;
+      }
       const desiredQty = Math.max(0, targetQty - heldQty);
       const desiredUsd = desiredQty * price;
       // Clamp VA size to [0.25x, 3x] of the fixed amount so one missed cycle

@@ -260,3 +260,77 @@ test('DCA TP: sells at the profit floor, never below the dca sub-book basis', ()
   assert.ok(s.subBook!.realizedPnlUsd > 0, `TP must bank a gain, got ${s.subBook!.realizedPnlUsd}`);
   assert.ok(store.subBooksConserved(), 'conservation after floored TP sell');
 });
+
+// ---------------------------------------------------------------------------
+// Value-averaging must track the DCA SUB-BOOK, not the commingled aggregate.
+// Grid buys inflate the aggregate position; measuring VA against aggregate made
+// DCA believe it was already past target and permanently buy only the floor
+// increment (or nothing), silently neutering the DCA leg on a live wallet that
+// also runs the grid. This pins the ring-fence.
+// ---------------------------------------------------------------------------
+test('DCA value-averaging tracks the DCA sub-book, not grid-inflated aggregate inventory', () => {
+  const c = cfg();
+  c.strategies.dca.vaEnabled = true;
+  c.strategies.dca.vaTargetSol = 5;      // sizeable target — VA should want lots
+  c.strategies.dca.vaHorizonBuys = 12;
+  c.strategies.dca.usdcAmountPerBuy = 25;
+  c.risk.maxUsdcPosition = 100_000;
+  const store = new StateStore(c);
+  const oracle = new PriceOracle(c);
+  oracle.__setPrice(100, true);
+
+  // Simulate grid accumulating a large commingled position (grid lots, NOT dca).
+  store.upsertPosition({
+    baseAsset: 'SOL', quoteAsset: 'USDC',
+    baseQty: 100,            // 100 SOL of grid-owned inventory
+    quoteQty: 0,
+    avgCostPerBase: 100,
+  });
+  // The DCA sub-book is ring-fenced and EMPTY.
+  store.strategies.dca.subBook = {
+    baseQty: 0, avgCostPerBase: 0, realizedPnlUsd: 0, feesPaidUsd: 0,
+  };
+
+  const broker = new PaperBroker(c, store, oracle);
+  const dca = new DcaStrategy(c, store, broker, oracle);
+  store.strategies.dca.lastBuyAt = Date.now() - 61 * 60_000;
+  dca.tick();
+
+  // 1st buy is `buys+1 = 1` of a 12-buy horizon on a 5 SOL target: the VA
+  // desired qty is well above the $25 floor, so the DCA book must grow past
+  // the floor increment. Against the old aggregate read, heldQty=100 would
+  // exceed the target and VA would clamp to the minimum ($6.25) or floor.
+  const booked = store.strategies.dca.subBook!.baseQty;
+  assert.ok(booked > 0.2, `VA should buy its horizon increment, got ${booked} SOL`);
+  // And it must be measured off the EMPTY dca book, not the 100 SOL grid lot:
+  // a $25 base buy at $100 is 0.25 SOL; the VA target for buy #1 is > that, so
+  // the floor clamp applies only if the book were read as already-full.
+  assert.ok(booked >= 0.25 - 1e-9, `VA buy must not be suppressed by grid inventory, got ${booked}`);
+});
+
+test('DCA value-averaging measures progress from the dca book alone across buys', () => {
+  const c = cfg();
+  c.strategies.dca.vaEnabled = true;
+  c.strategies.dca.vaTargetSol = 2;
+  c.strategies.dca.vaHorizonBuys = 4;
+  c.strategies.dca.usdcAmountPerBuy = 50;
+  c.risk.maxUsdcPosition = 100_000;
+  c.strategies.dca.intervalMinutes = 1;
+  const store = new StateStore(c);
+  const oracle = new PriceOracle(c);
+  oracle.__setPrice(100, true);
+  const broker = new PaperBroker(c, store, oracle);
+  const dca = new DcaStrategy(c, store, broker, oracle);
+
+  // Four due buys, each 1 minute apart on a 4-buy horizon toward 2 SOL.
+  for (let i = 0; i < 4; i++) {
+    store.strategies.dca.lastBuyAt = Date.now() - 2 * 60_000;
+    dca.tick();
+  }
+  const booked = store.strategies.dca.subBook!.baseQty;
+  // The path should have accumulated toward the 2 SOL target, not idled at the
+  // floor: total bought from a $50 base over the horizon is on the order of the
+  // target. Assert it is materially above a single floor increment.
+  assert.ok(booked > 0.9, `VA path should accumulate toward target, got ${booked} SOL`);
+  assert.ok(booked <= 2 + 1e-9, `VA path must not overshoot the target, got ${booked} SOL`);
+});
