@@ -63,14 +63,21 @@ export class PerpSleeve {
     });
   }
 
-  /** Grid-owned SOL inventory in USD at the given mark — the hedge target. */
+  /**
+   * Directional net-long SOL exposure in USD at the given mark — the hedge
+   * target. It MUST include BOTH ring-fenced spot sub-books: DCA inventory is
+   * just as directional as grid inventory, so hedging only the grid book left
+   * the DCA leg's SOL unhedged (and made the target jump the instant the grid
+   * book emptied).
+   */
   private gridNetLongUsd(mark: number): number {
-    const g = this.store.strategies.grid.subBook;
-    const gridQty = g?.baseQty ?? 0;
-    // Fall back to the wallet's actual SOL when the grid sub-book is empty or
-    // mid-recycle: the exposure still exists on-chain even if the book is flat.
-    const walletSol = this.store.audit().chainSol ?? 0;
-    const qty = gridQty > 0 ? gridQty : walletSol;
+    const gridQty = this.store.strategies.grid.subBook?.baseQty ?? 0;
+    const dcaQty = this.store.strategies.dca.subBook?.baseQty ?? 0;
+    // Legacy fallback ONLY when neither ring-fenced book exists at all. Falling
+    // back to the whole wallet whenever a book read zero counted unrelated
+    // on-chain SOL as "grid long" and could trim inventory we do not own.
+    const anyBook = this.store.strategies.grid.subBook || this.store.strategies.dca.subBook;
+    const qty = anyBook ? gridQty + dcaQty : (this.store.audit().chainSol ?? 0);
     return Math.max(0, qty * mark);
   }
 
@@ -187,7 +194,9 @@ export class PerpSleeve {
 
     // Loss ceiling: a breach halts the sleeve (no new margin) permanently.
     const halted = this.ledger.snapshotLedger().halted;
-    if (this.ledger.snapshotLedger().realizedPnlUsd <= -p.maxLossUsd) {
+    // A ceiling of 0 means NO loss ceiling (derive-only posture). Without this
+    // guard, `realized <= -0` would halt the sleeve on the first flat close.
+    if (p.maxLossUsd > 0 && this.ledger.snapshotLedger().realizedPnlUsd <= -p.maxLossUsd) {
       if (!halted) {
         this.ledger.setHalt(
           `realized loss ${this.ledger.snapshotLedger().realizedPnlUsd.toFixed(2)} breached -${p.maxLossUsd}`
@@ -198,20 +207,16 @@ export class PerpSleeve {
           note: `sleeve halted: loss ceiling`,
         });
         // Optional: flatten immediately instead of leaving the position managed.
+        // Route through settleClose so a rejected venue close does NOT book us
+        // flat and orphan a live position.
         const held = this.ledger.snapshotLedger().position;
         if (p.haltClosesOpen && held) {
           const notional = held.collateralUsd * held.leverage;
-          await this.broker.close({
-            asset: this.cfg.strategies.grid.baseAsset,
-            side: held.side,
-            collateralUsd: held.collateralUsd,
-            notionalUsd: notional,
-            positionPubkey: held.positionPubkey ?? '',
-            walletAddress: this.walletAddr(),
-            signer: this.signer,
-          });
-          this.ledger.setPosition(null);
-          this.ledger.record({ ts: Date.now(), kind: 'close', side: held.side, note: 'flattened on halt' });
+          const hpnl = perpUnrealizedPnlUsd(held.side, held.entryPriceUsd, mark.price, notional);
+          const hoursHeld = Math.max(0, (Date.now() - held.openedAt) / 3_600_000);
+          const carry = borrowAccrualUsd(notional, p.hourlyBorrowPct, hoursHeld);
+          const fee = held.collateralUsd * p.openFeePct * held.leverage;
+          await this.settleClose(held, notional, mark.price, hpnl - carry, fee, 'flattened on halt');
         }
       }
     }
@@ -308,28 +313,15 @@ export class PerpSleeve {
       // fee. Adding borrowUsd here too would count carry twice across
       // realizedPnlUsd and feesPaidUsd.
       const fee = pos.collateralUsd * p.openFeePct * pos.leverage;
-      this.ledger.setPosition(null);
-      this.ledger.rollRealized(netPnl, fee);
-      this.ledger.record({
-        ts: Date.now(),
-        kind: 'close',
-        side: pos.side,
-        collateralUsd: pos.collateralUsd,
-        notionalUsd: notional,
-        pnlUsd: netPnl,
-        price: mark,
-        note: `stop hit: net loss ${netPnl.toFixed(2)} (mark ${pnl.toFixed(2)}, carry ${borrowUsd.toFixed(3)}) <= -${stopUsd.toFixed(2)}`,
-      });
-      await this.broker.close({
-        asset: this.cfg.strategies.grid.baseAsset,
-        side: pos.side,
-        collateralUsd: pos.collateralUsd,
-        notionalUsd: notional,
-        positionPubkey: pos.positionPubkey ?? '',
-        walletAddress: this.walletAddr(),
-        signer: this.signer,
-      });
-      this.lastDecision = `closed ${pos.side} at stop (${pnl.toFixed(2)} USD)`;
+      const ok = await this.settleClose(
+        pos,
+        notional,
+        mark,
+        netPnl,
+        fee,
+        `stop hit: net loss ${netPnl.toFixed(2)} (mark ${pnl.toFixed(2)}, carry ${borrowUsd.toFixed(3)}) <= -${stopUsd.toFixed(2)}`
+      );
+      if (ok) this.lastDecision = `closed ${pos.side} at stop (${pnl.toFixed(2)} USD)`;
       return;
     }
 
@@ -338,34 +330,43 @@ export class PerpSleeve {
       const exposurePct = inputs.equityUsd > 0 ? inputs.gridNetLongUsd / inputs.equityUsd : 0;
       if (exposurePct < p.hedgeTriggerPct) {
         const fee = pos.collateralUsd * p.openFeePct * pos.leverage;
-        this.ledger.setPosition(null);
-        this.ledger.rollRealized(netPnl, fee);
-        this.ledger.record({
-          ts: Date.now(),
-          kind: 'close',
-          side: pos.side,
-          collateralUsd: pos.collateralUsd,
-          notionalUsd: notional,
-          pnlUsd: netPnl,
-          price: mark,
-          note: `hedge unwound: exposure back to ${(exposurePct * 100).toFixed(1)}%`,
-        });
-        await this.broker.close({
-          asset: this.cfg.strategies.grid.baseAsset,
-          side: pos.side,
-          collateralUsd: pos.collateralUsd,
-          notionalUsd: notional,
-          positionPubkey: pos.positionPubkey ?? '',
-          walletAddress: this.walletAddr(),
-          signer: this.signer,
-        });
-        this.lastDecision = `hedge unwound (exposure ${(exposurePct * 100).toFixed(1)}%)`;
+        const ok = await this.settleClose(
+          pos,
+          notional,
+          mark,
+          netPnl,
+          fee,
+          `hedge unwound: exposure back to ${(exposurePct * 100).toFixed(1)}%`
+        );
+        if (ok) this.lastDecision = `hedge unwound (exposure ${(exposurePct * 100).toFixed(1)}%)`;
       } else {
         this.lastDecision = `holding hedge (net ${netPnl.toFixed(2)} USD, carry ${borrowUsd.toFixed(3)})`;
       }
-    } else {
-      this.lastDecision = `holding overlay (net ${netPnl.toFixed(2)} USD, carry ${borrowUsd.toFixed(3)})`;
+      return;
     }
+
+    // Tier-3 overlay exit: take a PROFIT when the move has run far enough, or
+    // cut a loss. Without an exit the overlay could only ever round-trip its
+    // gain back to the stop (it has no unwind condition like the hedge does).
+    // Profit target is expressed in margin terms so it is independent of
+    // leverage: bank when unrealized gain reaches the take-profit share of the
+    // margin posted, and cut at the same margin stop used for hedges.
+    const tpUsd = pos.collateralUsd * (this.cfg.strategies.perps?.overlayTakeProfitPct ?? 0.5);
+    if (netPnl >= tpUsd || netPnl <= -stopUsd) {
+      const fee = pos.collateralUsd * p.openFeePct * pos.leverage;
+      const why = netPnl >= tpUsd ? 'overlay take-profit' : 'overlay stop';
+      const ok = await this.settleClose(
+        pos,
+        notional,
+        mark,
+        netPnl,
+        fee,
+        `${why}: net ${netPnl.toFixed(2)} USD (carry ${borrowUsd.toFixed(3)})`
+      );
+      if (ok) this.lastDecision = `closed overlay ${why.toLowerCase()} (${netPnl.toFixed(2)} USD)`;
+      return;
+    }
+    this.lastDecision = `holding overlay (net ${netPnl.toFixed(2)} USD, carry ${borrowUsd.toFixed(3)})`;
   }
 
   private walletAddr(): string {
@@ -509,6 +510,63 @@ export class PerpSleeve {
       note: `${decision.intent} opened: ${decision.reason}; liq ${q.liquidationPriceUsd.toFixed(2)}`,
     });
     this.lastDecision = `opened ${decision.side} ${decision.intent} (${q.collateralUsd} @ ${q.leverage}x)`;
+  }
+
+  /**
+   * Close a position at the venue FIRST, and only book the ledger flat once the
+   * venue confirms it. The previous order booked the ledger flat before awaiting
+   * the close, so a rejected/failed close left us believing we were flat while
+   * the venue still held a live position — the next tick would open a SECOND
+   * position on top of it, unmanaged. This mirrors the grid's "never trust the
+   * ledger over the chain" rule.
+   *
+   * Paper mode skips the venue entirely (no network in paper), mirroring
+   * openPosition, so paper stays self-contained and deterministic.
+   */
+  private async settleClose(
+    pos: PerpPosition,
+    notional: number,
+    mark: number,
+    netPnl: number,
+    fee: number,
+    note: string
+  ): Promise<boolean> {
+    if (this.cfg.mode === 'live') {
+      const res = await this.broker.close({
+        asset: this.cfg.strategies.grid.baseAsset,
+        side: pos.side,
+        collateralUsd: pos.collateralUsd,
+        notionalUsd: notional,
+        positionPubkey: pos.positionPubkey ?? '',
+        walletAddress: this.walletAddr(),
+        signer: this.signer,
+      });
+      if (!res.ok) {
+        // The position still exists on-chain: keep it, do NOT book flat.
+        this.ledger.record({
+          ts: Date.now(),
+          kind: 'reject',
+          side: pos.side,
+          collateralUsd: pos.collateralUsd,
+          note: `close rejected: ${res.error ?? 'unknown'}; position retained`,
+        });
+        this.lastDecision = `close failed: ${res.error ?? 'unknown'}`;
+        return false;
+      }
+    }
+    this.ledger.setPosition(null);
+    this.ledger.rollRealized(netPnl, fee);
+    this.ledger.record({
+      ts: Date.now(),
+      kind: 'close',
+      side: pos.side,
+      collateralUsd: pos.collateralUsd,
+      notionalUsd: notional,
+      pnlUsd: netPnl,
+      price: mark,
+      note,
+    });
+    return true;
   }
 
   /** Perps ledger tape (open/close/halt/reject) for the dashboard tab. */

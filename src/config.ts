@@ -235,9 +235,11 @@ export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   maxNetExposurePct: 0.35,
   hedgeTriggerPct: 0.15,
   stopLossMarginPct: 0.25,
-  maxLossUsd: 75,
+  maxLossUsd: 0,
   overlayEnabled: false,
   overlayBudgetPct: 0.5,
+  // Bank the overlay at +50% of posted margin; cut at the shared stop.
+  overlayTakeProfitPct: 0.5,
   // Short-only by default: the hedge is always a short, and the overlay defaults
   // to short too, so the sleeve never goes long unless an operator opts in.
   overlaySide: 'short',
@@ -284,6 +286,12 @@ export interface PerpSleeveConfig {
    * "halt" blocks NEW margin only and keeps managing the live position.
    */
   haltClosesOpen: boolean;
+  /**
+   * Take-profit share of posted margin for the Tier-3 overlay (default 0.5).
+   * Expressed in margin terms so it is leverage-independent; the overlay cuts
+   * at the shared margin stop. Optional so hand-built test configs stay valid.
+   */
+  overlayTakeProfitPct?: number;
   /**
    * POLICY leverage ceiling override. 0 (default) = no hardcoded ceiling: the
    * ceiling is DERIVED from live venue volatility. Set > 0 only to pin an
@@ -513,9 +521,10 @@ export function loadConfig(): AppConfig {
         maxNetExposurePct: envNumber('PERPS_MAX_NET_EXPOSURE_PCT', 0.35, 0, 1),
         hedgeTriggerPct: envNumber('PERPS_HEDGE_TRIGGER_PCT', 0.15, 0, 1),
         stopLossMarginPct: envNumber('PERPS_STOP_LOSS_MARGIN_PCT', 0.25, 0.01, 0.99),
-        maxLossUsd: envNumber('PERPS_MAX_LOSS_USD', 75, 0, 1e9),
+        maxLossUsd: envNumber('PERPS_MAX_LOSS_USD', 0, 0, 1e9),
         overlayEnabled: envBool('PERPS_OVERLAY_ENABLED', false),
         overlayBudgetPct: envNumber('PERPS_OVERLAY_BUDGET_PCT', 0.5, 0, 1),
+        overlayTakeProfitPct: envNumber('PERPS_OVERLAY_TAKE_PROFIT_PCT', 0.5, 0.01, 100),
         // Direction the Tier-3 overlay takes when enabled. The sleeve is
         // SHORT-ONLY by default: the hedge is always a short (it trims net-long
         // spot SOL), and the overlay defaults to short too, so the sleeve never

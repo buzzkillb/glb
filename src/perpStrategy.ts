@@ -74,6 +74,7 @@ export interface PerpSleeveConfig {
   overlayEnabled: boolean;
   /** Fraction of sleeve budget the overlay may use. */
   overlayBudgetPct: number;
+  overlayTakeProfitPct?: number;
   /** Principal floor in USD. 0 = auto-seed to the first observed equity. */
   baselineEquityUsd: number;
 }
