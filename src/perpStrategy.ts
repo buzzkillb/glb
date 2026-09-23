@@ -68,6 +68,19 @@ export interface PerpSleeveConfig {
   hedgeTriggerPct: number;
   /** Stop is placed at this fraction of margin loss — must sit INSIDE liquidation. */
   stopLossMarginPct: number;
+  /**
+   * Take-profit share of posted margin for a hedge short (e.g. 0.25 = bank when
+   * the hedge has made 25% of its margin). 0 disables, leaving the hedge exit
+   * purely to the stop and the exposure unwind. This is what makes the sleeve
+   * ACTUALLY bank money on the downside instead of sitting flat forever.
+   */
+  hedgeTakeProfitPct?: number;
+  /**
+   * Minutes to wait after a hedge take-profit/unwind before re-arming. Without
+   * it, re-opening at the same mark could immediately re-trigger the take-profit
+   * and churn venue fees for zero edge.
+   */
+  hedgeRearmCooldownMinutes?: number;
   /** Loss ceiling (USD): sleeve halts if its own realized loss breaches this. */
   maxLossUsd: number;
   /** Optional directional overlay: 0 disables. */
@@ -491,6 +504,41 @@ export function stopInsideLiquidation(
 function clamp(v: number, lo: number, hi: number): number {
   if (!Number.isFinite(v)) return lo;
   return Math.min(hi, Math.max(lo, v));
+}
+
+/**
+ * Should an open HEDGE be banked now? The hedge exists to be USEFUL, not to sit
+ * flat forever: it should realise a profit once it has earned enough of its
+ * posted margin, and otherwise stay on until the stop or an exposure unwind.
+ *
+ * Pure and side-effect-free so the take-profit rule is directly testable:
+ *   - `hedgeTakeProfitPct <= 0` disables take-profit (hedge-only, stop/unwind).
+ *   - otherwise true when net PnL (incl. carry) reaches tp% of posted margin.
+ */
+export function hedgeTakeProfitHit(
+  netPnlUsd: number,
+  collateralUsd: number,
+  hedgeTakeProfitPct: number | undefined
+): boolean {
+  const tp = hedgeTakeProfitPct ?? 0;
+  if (!(tp > 0) || !(collateralUsd > 0)) return false;
+  return netPnlUsd >= collateralUsd * tp;
+}
+
+/**
+ * Has the sleeve's re-arm cooldown elapsed? After a close we wait so the sleeve
+ * cannot immediately re-enter at the same mark and churn venue fees for no edge.
+ * `cooldownMinutes <= 0` disables. A zero `lastActionAt` (never traded) is ready.
+ */
+export function rearmCooldownElapsed(
+  nowMs: number,
+  lastActionAtMs: number,
+  cooldownMinutes: number | undefined
+): boolean {
+  const cd = (cooldownMinutes ?? 0) * 60_000;
+  if (!(cd > 0)) return true;
+  if (!(lastActionAtMs > 0)) return true;
+  return nowMs - lastActionAtMs >= cd;
 }
 
 /**

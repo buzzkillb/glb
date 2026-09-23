@@ -235,6 +235,11 @@ export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   maxNetExposurePct: 0.35,
   hedgeTriggerPct: 0.15,
   stopLossMarginPct: 0.25,
+  // Bank the hedge at +25% of posted margin (symmetric with the stop) so the
+  // short actively harvests the downside instead of sitting flat, then re-arm
+  // after a cooldown so it cannot churn fees re-opening on the same mark.
+  hedgeTakeProfitPct: 0.25,
+  hedgeRearmCooldownMinutes: 30,
   maxLossUsd: 0,
   overlayEnabled: false,
   overlayBudgetPct: 0.5,
@@ -336,6 +341,18 @@ export interface PerpSleeveConfig {
   hedgeTriggerPct: number;
   /** Stop is placed at this fraction of margin loss — must sit INSIDE liquidation. */
   stopLossMarginPct: number;
+  /**
+   * Take-profit share of posted margin for a hedge short (e.g. 0.25 = bank when
+   * the hedge has made 25% of its margin). 0 disables, leaving the hedge exit
+   * purely to the stop and the exposure unwind. This is what makes the sleeve
+   * ACTUALLY bank money on the downside instead of sitting flat forever.
+   */
+  hedgeTakeProfitPct?: number;
+  /**
+   * Minutes to wait after a hedge take-profit/unwind before re-arming, so the
+   * sleeve cannot churn venue fees re-entering at the same mark.
+   */
+  hedgeRearmCooldownMinutes?: number;
   /** Loss ceiling (USD): sleeve halts if its own realized loss breaches this. */
   maxLossUsd: number;
   /** Directional overlay (Tier 3). Off by default. */
@@ -521,6 +538,8 @@ export function loadConfig(): AppConfig {
         maxNetExposurePct: envNumber('PERPS_MAX_NET_EXPOSURE_PCT', 0.35, 0, 1),
         hedgeTriggerPct: envNumber('PERPS_HEDGE_TRIGGER_PCT', 0.15, 0, 1),
         stopLossMarginPct: envNumber('PERPS_STOP_LOSS_MARGIN_PCT', 0.25, 0.01, 0.99),
+        hedgeTakeProfitPct: envNumber('PERPS_HEDGE_TAKE_PROFIT_PCT', 0.25, 0, 100),
+        hedgeRearmCooldownMinutes: envNumber('PERPS_HEDGE_REARM_COOLDOWN_MINUTES', 30, 0, 10080),
         maxLossUsd: envNumber('PERPS_MAX_LOSS_USD', 0, 0, 1e9),
         overlayEnabled: envBool('PERPS_OVERLAY_ENABLED', false),
         overlayBudgetPct: envNumber('PERPS_OVERLAY_BUDGET_PCT', 0.5, 0, 1),

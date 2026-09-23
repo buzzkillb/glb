@@ -7,7 +7,9 @@ import { PerpStore, type PerpPosition } from './perpStore.js';
 import {
   borrowAccrualUsd,
   decideSleeveAction,
+  hedgeTakeProfitHit,
   perpUnrealizedPnlUsd,
+  rearmCooldownElapsed,
   smartLeverageView,
   stopInsideLiquidation,
   type PerpSleeveConfig,
@@ -273,6 +275,18 @@ export class PerpSleeve {
       return;
     }
 
+    // Re-arm cooldown: after the sleeve has just closed/traded, wait before
+    // opening again so it cannot churn venue fees re-entering at the same mark
+    // (e.g. re-open a hedge that instantly re-hits its take-profit). lastActionAt
+    // is the persisted timestamp of the last open/close/halt/reject.
+    const last = this.ledger.snapshotLedger().lastActionAt;
+    if (!rearmCooldownElapsed(Date.now(), last, p.hedgeRearmCooldownMinutes)) {
+      const cd = (p.hedgeRearmCooldownMinutes as number) * 60_000;
+      const mins = Math.ceil((cd - (Date.now() - last)) / 60_000);
+      this.lastDecision = `re-arm cooldown (~${mins}m left)`;
+      return;
+    }
+
     // Hand the live ceiling to the strategy so it never re-derives a floor.
     const signaledInputs: SleeveInputs = { ...inputs, deployableMarginUsd: deployable };
     const decision = decideSleeveAction(p, signaledInputs);
@@ -322,6 +336,25 @@ export class PerpSleeve {
         `stop hit: net loss ${netPnl.toFixed(2)} (mark ${pnl.toFixed(2)}, carry ${borrowUsd.toFixed(3)}) <= -${stopUsd.toFixed(2)}`
       );
       if (ok) this.lastDecision = `closed ${pos.side} at stop (${pnl.toFixed(2)} USD)`;
+      return;
+    }
+
+    // Hedge take-profit: BANK the gain once the short has earned enough of its
+    // posted margin, then stand down. Without this the hedge could only ever
+    // wait for the margin stop or an exposure unwind — it would protect but
+    // never actually realise a profit, which defeats the point of the sleeve.
+    if (pos.intent === 'hedge' && hedgeTakeProfitHit(netPnl, pos.collateralUsd, p.hedgeTakeProfitPct)) {
+      const tpUsd = pos.collateralUsd * (p.hedgeTakeProfitPct as number);
+      const fee = pos.collateralUsd * p.openFeePct * pos.leverage;
+      const ok = await this.settleClose(
+        pos,
+        notional,
+        mark,
+        netPnl,
+        fee,
+        `hedge take-profit: net ${netPnl.toFixed(2)} USD (carry ${borrowUsd.toFixed(3)}) >= ${tpUsd.toFixed(2)}`
+      );
+      if (ok) this.lastDecision = `closed hedge take-profit (${netPnl.toFixed(2)} USD)`;
       return;
     }
 
