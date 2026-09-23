@@ -384,7 +384,14 @@ const envNumber = (key: string, fallback: number, min?: number, max?: number): n
 const envBool = (key: string, fallback: boolean): boolean => {
   const v = process.env[key];
   if (v === undefined || v === '') return fallback;
-  return v === 'true' || v === '1';
+  // Accept the spellings an operator actually types. The old exact-match check
+  // meant PERPS_SHORT_ONLY=TRUE (or yes/on) silently DISABLED the short-only
+  // guard — the value most likely to be written for a safety flag.
+  const norm = v.trim().toLowerCase();
+  if (norm === 'true' || norm === '1' || norm === 'yes' || norm === 'on') return true;
+  if (norm === 'false' || norm === '0' || norm === 'no' || norm === 'off') return false;
+  console.warn(`[config] ${key}="${v}" is not a recognized boolean; using ${fallback}`);
+  return fallback;
 };
 
 export function loadConfig(): AppConfig {

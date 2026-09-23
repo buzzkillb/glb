@@ -43,6 +43,17 @@ export const PERP_MIN_LEVERAGE = 1.1;
 /** Venue-enforced floor for opening a new position (USD). */
 export const PERP_MIN_COLLATERAL_USD = 10;
 
+/**
+ * Base-unit decimals per market mint, for converting a USD long-collateral size
+ * into raw token units. Keyed by mint so ETH/BTC do not silently borrow SOL's 9.
+ */
+const MARKET_DECIMALS: Record<string, number> = {
+  [USDC_MINT]: USDC_DECIMALS,
+  [PERP_MARKETS.SOL]: SOL_DECIMALS,
+  [PERP_MARKETS.ETH]: 8,
+  [PERP_MARKETS.BTC]: 8,
+};
+
 export interface PerpQuote {
   entryPriceUsd: number;
   liquidationPriceUsd: number;
@@ -96,7 +107,9 @@ function usdToRaw(usd: number, decimals = USDC_DECIMALS): string {
 
 /** Decimal places for a mint, for converting a USD size into raw base units. */
 function mintDecimals(mint: string): number {
-  return mint === USDC_MINT ? USDC_DECIMALS : SOL_DECIMALS;
+  // Fall back to USDC's precision only for the unknown case; every market we
+  // actually trade is explicitly mapped in MARKET_DECIMALS.
+  return MARKET_DECIMALS[mint] ?? USDC_DECIMALS;
 }
 
 export class PerpBroker {

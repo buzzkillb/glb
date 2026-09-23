@@ -7,6 +7,7 @@ import { PerpStore, type PerpPosition } from './perpStore.js';
 import {
   borrowAccrualUsd,
   decideSleeveAction,
+  perpUnrealizedPnlUsd,
   smartLeverageView,
   stopInsideLiquidation,
   type PerpSleeveConfig,
@@ -93,10 +94,7 @@ export class PerpSleeve {
     if (!pos) return 0;
     const p = this.cfg.strategies.perps ?? DEFAULT_PERPS_CONFIG;
     const notional = pos.collateralUsd * pos.leverage;
-    const dir = pos.side === 'short' ? 1 : -1;
-    const moveFrac =
-      pos.entryPriceUsd > 0 && mark > 0 ? (mark - pos.entryPriceUsd) / pos.entryPriceUsd : 0;
-    const pnl = dir * moveFrac * notional;
+    const pnl = perpUnrealizedPnlUsd(pos.side, pos.entryPriceUsd, mark, notional);
     const hoursHeld = Math.max(0, (Date.now() - pos.openedAt) / 3_600_000);
     const carry = borrowAccrualUsd(notional, p.hourlyBorrowPct, hoursHeld);
     return Math.max(0, pos.collateralUsd + pnl - carry);
@@ -290,10 +288,8 @@ export class PerpSleeve {
   ): Promise<void> {
     // Unrealized PnL on the perp (paper/mark model — identical formula to what
     // the venue would report).
-    const dir = pos.side === 'short' ? 1 : -1; // short profits when mark falls
-    const moveFrac = (mark - pos.entryPriceUsd) / pos.entryPriceUsd;
     const notional = pos.collateralUsd * pos.leverage;
-    const pnl = dir * moveFrac * notional;
+    const pnl = perpUnrealizedPnlUsd(pos.side, pos.entryPriceUsd, mark, notional);
 
     // Borrow/funding accrual: recomputed idempotently from openedAt each tick
     // (never persisted incrementally, so it cannot double-count). Real perps
@@ -308,7 +304,10 @@ export class PerpSleeve {
     // SAFETY: if we are past our margin stop (INCLUDING carry), close — our stop
     // is verified to sit INSIDE liquidation at open, so it fires before the venue.
     if (netPnl <= -stopUsd) {
-      const fee = pos.collateralUsd * p.openFeePct * pos.leverage + borrowUsd;
+      // `netPnl` already includes carry, so the fee line records ONLY the open
+      // fee. Adding borrowUsd here too would count carry twice across
+      // realizedPnlUsd and feesPaidUsd.
+      const fee = pos.collateralUsd * p.openFeePct * pos.leverage;
       this.ledger.setPosition(null);
       this.ledger.rollRealized(netPnl, fee);
       this.ledger.record({
@@ -338,7 +337,7 @@ export class PerpSleeve {
     if (pos.intent === 'hedge') {
       const exposurePct = inputs.equityUsd > 0 ? inputs.gridNetLongUsd / inputs.equityUsd : 0;
       if (exposurePct < p.hedgeTriggerPct) {
-        const fee = pos.collateralUsd * p.openFeePct * pos.leverage + borrowUsd;
+        const fee = pos.collateralUsd * p.openFeePct * pos.leverage;
         this.ledger.setPosition(null);
         this.ledger.rollRealized(netPnl, fee);
         this.ledger.record({

@@ -511,3 +511,24 @@ export function borrowAccrualUsd(
     Math.max(0, hoursHeld)
   );
 }
+
+/**
+ * Unrealized PnL of a perp position at the current mark, in USD.
+ *
+ * SIGN IS THE WHOLE POINT: a SHORT profits when the mark FALLS and a LONG when
+ * it rises. Computing the move in the position's own favour makes the sign
+ * unambiguous — the earlier `dir * (mark - entry)` form made every short lose
+ * when the market fell, which inverted the stop/halt logic.
+ */
+export function perpUnrealizedPnlUsd(
+  side: 'long' | 'short',
+  entryPriceUsd: number,
+  markPriceUsd: number,
+  notionalUsd: number
+): number {
+  if (!(entryPriceUsd > 0) || !(markPriceUsd > 0)) return 0;
+  const move =
+    (side === 'long' ? markPriceUsd - entryPriceUsd : entryPriceUsd - markPriceUsd) /
+    entryPriceUsd;
+  return move * Math.max(0, notionalUsd);
+}

@@ -190,6 +190,9 @@ export class PerpStore {
   }
 
   rollRealized(pnlUsd: number, feeUsd: number): void {
+    // `realizedPnlUsd` is the sleeve's net trading result (used by the loss
+    // ceiling); `feesPaidUsd` is the cost line. Keep them disjoint so carry is
+    // never counted in both — callers pass net PnL here and fee/carry once.
     this.ledger.realizedPnlUsd += pnlUsd;
     this.ledger.feesPaidUsd += feeUsd;
     this.save();
