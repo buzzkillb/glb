@@ -830,6 +830,35 @@ export class PerpSleeve {
             liquidationPriceUsd: pos.liquidationPriceUsd,
             notionalUsd: pos.collateralUsd * pos.leverage,
             openedAt: pos.openedAt,
+            /**
+             * LIVE mark-to-market PnL for the open position — the number the
+             * tab previously never showed. `unrealizedPnlUsd` is the raw venue
+             * PnL (margin PnL at the current mark); `netPnlUsd` is what the
+             * stop/take-profit actually judge: unrealized MINUS accrued
+             * borrow/funding carry, so a held position cannot look profitable
+             * while carry quietly eats it.
+             */
+            unrealizedPnlUsd: pos.collateralUsd * pos.leverage
+              ? perpUnrealizedPnlUsd(pos.side, pos.entryPriceUsd, mark, pos.collateralUsd * pos.leverage)
+              : 0,
+            carryUsd: pos.collateralUsd * pos.leverage
+              ? borrowAccrualUsd(
+                  pos.collateralUsd * pos.leverage,
+                  p.hourlyBorrowPct,
+                  Math.max(0, (Date.now() - pos.openedAt) / 3_600_000)
+                )
+              : 0,
+            netPnlUsd:
+              (pos.collateralUsd * pos.leverage
+                ? perpUnrealizedPnlUsd(pos.side, pos.entryPriceUsd, mark, pos.collateralUsd * pos.leverage)
+                : 0) -
+              (pos.collateralUsd * pos.leverage
+                ? borrowAccrualUsd(
+                    pos.collateralUsd * pos.leverage,
+                    p.hourlyBorrowPct,
+                    Math.max(0, (Date.now() - pos.openedAt) / 3_600_000)
+                  )
+                : 0),
           }
         : null,
       liquidationBufferPct,

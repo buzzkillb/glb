@@ -317,6 +317,12 @@ export interface PerpsState {
     liquidationPriceUsd: number;
     notionalUsd: number;
     openedAt: number;
+    /** Raw mark-to-market PnL (USD) on the open position at the current mark. */
+    unrealizedPnlUsd?: number;
+    /** Borrow/funding carry accrued (USD) — a cost that grows while held. */
+    carryUsd?: number;
+    /** unrealizedPnlUsd − carryUsd: the net PnL the stop/take-profit judge. */
+    netPnlUsd?: number;
   } | null;
   /** For a short: (liquidation - mark)/mark as a fraction; positive = safe. */
   liquidationBufferPct: number;
