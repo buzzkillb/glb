@@ -189,7 +189,12 @@ export class PriceOracle extends EventEmitter {
 
   /**
    * Highest price seen over the last `minutes` of on-chain DEX history.
-   * Falls back to live candles, then a cushion around the current price.
+   *
+   * Returns 0 ("unknown") when neither the on-chain history nor the live
+   * polled candles cover the window. We deliberately do NOT invent a cushion
+   * around spot: a fabricated "24h high" would render on the dashboard as if
+   * it were a real observed extreme. Callers treat 0 as "no reading" — the
+   * grid band falls back to a price-derived pad and the dashboard shows '—'.
    */
   recentHigh(minutes = 1440): number {
     const from = Date.now() - minutes * 60_000;
@@ -197,17 +202,17 @@ export class PriceOracle extends EventEmitter {
     if (recent.length > 0) return Math.max(...recent.map((c) => c.high));
     const live = this.candles.slice(-Math.max(2, Math.ceil(minutes / 5)));
     if (live.length > 0) return Math.max(...live.map((c) => c.high));
-    return this.price * 1.05;
+    return 0;
   }
 
-  /** Lowest price seen over the last `minutes` of on-chain DEX history. */
+  /** Lowest price seen over the last `minutes` of on-chain DEX history (0 = unknown). */
   recentLow(minutes = 1440): number {
     const from = Date.now() - minutes * 60_000;
     const recent = this.history.filter((c) => c.ts >= from);
     if (recent.length > 0) return Math.min(...recent.map((c) => c.low));
     const live = this.candles.slice(-Math.max(2, Math.ceil(minutes / 5)));
     if (live.length > 0) return Math.min(...live.map((c) => c.low));
-    return this.price * 0.95;
+    return 0;
   }
 
   /**
