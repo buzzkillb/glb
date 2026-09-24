@@ -71,6 +71,15 @@ export interface PerpLedger {
   halted: boolean;
   haltReason: string;
   lastActionAt: number;
+  /**
+   * Hedgeable spot exposure (USD) at the moment the last position CLOSED. After
+   * a winning hedge banks and the re-arm cooldown starts, a dip can fill fresh
+   * grid/DCA buys that the just-closed hedge no longer covers. Comparing the
+   * current exposure against this value lets the sleeve re-arm IMMEDIATELY when
+   * genuinely new unhedged inventory appears — closing the post-close gap —
+   * while still blocking fee-churn re-entry at the SAME mark (no new exposure).
+   */
+  lastCloseExposureUsd: number;
   history: PerpHistoryEntry[];
   /**
    * Rolling samples of the OPEN position's live PnL while it is held, so the
@@ -99,6 +108,7 @@ const EMPTY: PerpLedger = {
   feesPaidUsd: 0,
   position: null,
   halted: false,
+  lastCloseExposureUsd: 0,
   haltReason: '',
   lastActionAt: 0,
   history: [],
@@ -195,6 +205,16 @@ export class PerpStore {
     // sparkline never splices two different trades into one misleading line.
     if (!p) this.ledger.pnlSeries = [];
     this.setOutstanding(p ? p.collateralUsd : 0);
+  }
+
+  /**
+   * Record the hedgeable spot exposure that existed when the last position
+   * closed. A later tick compares live exposure against this to decide whether
+   * genuinely NEW unhedged inventory justifies re-arming inside the cooldown.
+   */
+  setLastCloseExposure(exposureUsd: number): void {
+    this.ledger.lastCloseExposureUsd = Math.max(0, exposureUsd);
+    this.save();
   }
 
   /**

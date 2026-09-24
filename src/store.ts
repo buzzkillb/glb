@@ -775,10 +775,41 @@ export class StateStore extends EventEmitter {
       if (this.price >= lower && this.price <= upper) this.bandInside++;
     }
 
+    // ---------------------------------------------------------------------
+    // COMBINED BOOK: one honest all-in number — spot (grid/DCA/memes) NET of
+    // their fees PLUS the perps sleeve NET of its fees and carry, realized and
+    // open. The dashboard previously showed no single "is the bot up, all-in,
+    // after costs?" figure; this is it. Perps stays broken out beneath so the
+    // contribution is never hidden.
+    // ---------------------------------------------------------------------
+    const all = booksFor(0);
+    const spotRealizedNet = all
+      .filter((b) => b.strategyId !== 'perps')
+      .reduce((sum, b) => sum + (b.netPnlUsd || 0), 0);
+    const pp = this.strategies.perps;
+    const perpsRealizedNet = (pp?.realizedPnlUsd ?? 0) - (pp?.feesPaidUsd ?? 0);
+    const spotUnrealized = this.unrealizedPnlUsd();
+    const perpsUnrealized = pp?.open?.netPnlUsd ?? 0;
+    const combined = {
+      spotRealizedNetUsd: spotRealizedNet,
+      perpsRealizedNetUsd: perpsRealizedNet,
+      totalRealizedNetUsd: spotRealizedNet + perpsRealizedNet,
+      spotUnrealizedUsd: spotUnrealized,
+      perpsUnrealizedUsd: perpsUnrealized,
+      totalUnrealizedUsd: spotUnrealized + perpsUnrealized,
+      grandTotalUsd: spotRealizedNet + perpsRealizedNet + spotUnrealized + perpsUnrealized,
+      // Perps as a share of all-in net, so its contribution is explicit.
+      perpsSharePct:
+        Math.abs(spotRealizedNet + perpsRealizedNet) > 1e-9
+          ? perpsRealizedNet / (spotRealizedNet + perpsRealizedNet)
+          : 0,
+    };
+
     return {
       books: booksFor(24 * 3600_000),
       books7d: booksFor(7 * 24 * 3600_000),
       booksAll: booksFor(0),
+      combined,
       band: {
         lower,
         upper,

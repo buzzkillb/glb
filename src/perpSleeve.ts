@@ -11,6 +11,7 @@ import {
   planHedgeTakeProfit,
   perpUnrealizedPnlUsd,
   rearmCooldownElapsed,
+  rearmJustifiedByNewExposure,
   smartLeverageView,
   stopInsideLiquidation,
   type PerpSleeveConfig,
@@ -334,12 +335,26 @@ export class PerpSleeve {
     // opening again so it cannot churn venue fees re-entering at the same mark
     // (e.g. re-open a hedge that instantly re-hits its take-profit). lastActionAt
     // is the persisted timestamp of the last open/close/halt/reject.
-    const last = this.ledger.snapshotLedger().lastActionAt;
+    //
+    // POST-CLOSE GAP CLOSED: the cooldown must not leave NEW inventory exposed.
+    // If the current hedgeable exposure (actual + planned) exceeds what the last
+    // close was covering by a meaningful margin, genuinely new unhedged risk has
+    // appeared — a dip filled grid/DCA buys the closed hedge no longer covers —
+    // so re-arm IMMEDIATELY instead of waiting out the clock. Re-entry at the
+    // same/no exposure still waits, which is what the cooldown is for.
+    const led = this.ledger.snapshotLedger();
+    const last = led.lastActionAt;
     if (!rearmCooldownElapsed(Date.now(), last, p.hedgeRearmCooldownMinutes)) {
-      const cd = (p.hedgeRearmCooldownMinutes as number) * 60_000;
-      const mins = Math.ceil((cd - (Date.now() - last)) / 60_000);
-      this.lastDecision = `re-arm cooldown (~${mins}m left)`;
-      return;
+      const currentExposure = this.gridNetLongUsd(mark.price) + this.plannedSpotAccumUsd(mark.price);
+      const minNew = this.cfg.strategies.perps.hedgeRearmMinNewExposureUsd ?? 0;
+      const justified = rearmJustifiedByNewExposure(currentExposure, led.lastCloseExposureUsd, minNew);
+      if (!justified) {
+        const cd = (p.hedgeRearmCooldownMinutes as number) * 60_000;
+        const mins = Math.ceil((cd - (Date.now() - last)) / 60_000);
+        this.lastDecision = `re-arm cooldown (~${mins}m left)`;
+        return;
+      }
+      this.lastDecision = `re-arm early: +${(currentExposure - led.lastCloseExposureUsd).toFixed(0)}USD new unhedged exposure`;
     }
 
     // Hand the live ceiling to the strategy so it never re-derives a floor.
@@ -669,6 +684,9 @@ export class PerpSleeve {
       }
     }
     this.ledger.setPosition(null);
+    // Snapshot the exposure this hedge was covering, so a later tick can tell
+    // whether NEW unhedged inventory appeared (and re-arm early) vs the same bag.
+    this.ledger.setLastCloseExposure(this.gridNetLongUsd(mark) + this.plannedSpotAccumUsd(mark));
     this.ledger.rollRealized(netPnl, fee);
     this.ledger.record({
       ts: Date.now(),

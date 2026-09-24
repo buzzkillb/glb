@@ -362,6 +362,22 @@ export interface Snapshot {
     books: PerfBook[];
     books7d: PerfBook[];
     booksAll: PerfBook[];
+    /**
+     * One honest all-in figure: spot NET of fees plus the perps sleeve NET of
+     * fees/carry, realized and open. The perps contribution is broken out so it
+     * is never hidden inside the total.
+     */
+    combined: {
+      spotRealizedNetUsd: number;
+      perpsRealizedNetUsd: number;
+      totalRealizedNetUsd: number;
+      spotUnrealizedUsd: number;
+      perpsUnrealizedUsd: number;
+      totalUnrealizedUsd: number;
+      grandTotalUsd: number;
+      /** Perps realized share of total realized net (0 when total ~ 0). */
+      perpsSharePct: number;
+    };
     /** Grid band occupancy: share of sampled polls inside [lower, upper]. */
     band: {
       lower: number;

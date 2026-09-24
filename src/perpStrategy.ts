@@ -660,6 +660,32 @@ export function rearmCooldownElapsed(
 }
 
 /**
+ * POST-CLOSE RE-ARM GAP: may the sleeve re-open BEFORE the cooldown expires?
+ *
+ * The cooldown exists to stop fee-churn — re-entering at the SAME mark right
+ * after banking. It must NOT leave genuinely NEW unhedged inventory exposed: a
+ * fresh hedge banks, then a dip fills grid/DCA buys that the closed hedge no
+ * longer covers, and the gap lasts until the cooldown lapses.
+ *
+ * This resolves that seam deliberately:
+ *   - if the CURRENT hedgeable exposure exceeds what the last close covered by
+ *     more than `minNewExposureUsd`, NEW risk has appeared → re-arm immediately;
+ *   - otherwise (same/no exposure) → keep waiting, exactly as before.
+ *
+ * The comparison is to the exposure AT CLOSE, so re-entry is justified by real
+ * new inventory, never by the same bag re-hitting the target.
+ */
+export function rearmJustifiedByNewExposure(
+  currentExposureUsd: number,
+  lastCloseExposureUsd: number,
+  minNewExposureUsd: number
+): boolean {
+  const need = Math.max(0, minNewExposureUsd);
+  const fresh = Math.max(0, currentExposureUsd) - Math.max(0, lastCloseExposureUsd);
+  return fresh >= need && need > 0;
+}
+
+/**
  * Carry (borrow/funding) owed on an open perp, as a USD cost.
  *
  * Recomputed from the immutable `openedAt` each tick rather than persisted

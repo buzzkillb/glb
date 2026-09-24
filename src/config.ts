@@ -244,6 +244,9 @@ export const DEFAULT_PERPS_CONFIG: PerpSleeveConfig = {
   hedgeTakeProfitMaxPct: 0.6,
   hedgeTakeProfitVolFactor: 1,
   hedgeRearmCooldownMinutes: 30,
+  // Re-arm early only when a real new dip-fill appears ($25 of fresh unhedged
+  // SOL), not for noise; keeps the fee-churn guard intact otherwise.
+  hedgeRearmMinNewExposureUsd: 25,
   maxLossUsd: 0,
   overlayEnabled: false,
   overlayBudgetPct: 0.5,
@@ -369,6 +372,12 @@ export interface PerpSleeveConfig {
    * sleeve cannot churn venue fees re-entering at the same mark.
    */
   hedgeRearmCooldownMinutes?: number;
+  /**
+   * USD of NEW hedgeable exposure (vs. the exposure at the last close) that
+   * justifies re-arming INSIDE the cooldown. 0 disables the early re-arm and
+   * restores pure time-based cooldown behavior.
+   */
+  hedgeRearmMinNewExposureUsd?: number;
   /** Loss ceiling (USD): sleeve halts if its own realized loss breaches this. */
   maxLossUsd: number;
   /** Directional overlay (Tier 3). Off by default. */
@@ -558,6 +567,7 @@ export function loadConfig(): AppConfig {
         hedgeTakeProfitMaxPct: envNumber('PERPS_HEDGE_TAKE_PROFIT_MAX_PCT', 0.6, 0, 100),
         hedgeTakeProfitVolFactor: envNumber('PERPS_HEDGE_TAKE_PROFIT_VOL_FACTOR', 1, 0.05, 100),
         hedgeRearmCooldownMinutes: envNumber('PERPS_HEDGE_REARM_COOLDOWN_MINUTES', 30, 0, 10080),
+        hedgeRearmMinNewExposureUsd: envNumber('PERPS_HEDGE_REARM_MIN_NEW_EXPOSURE_USD', 25, 0, 1e9),
         maxLossUsd: envNumber('PERPS_MAX_LOSS_USD', 0, 0, 1e9),
         overlayEnabled: envBool('PERPS_OVERLAY_ENABLED', false),
         overlayBudgetPct: envNumber('PERPS_OVERLAY_BUDGET_PCT', 0.5, 0, 1),

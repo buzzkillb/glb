@@ -626,14 +626,26 @@
     $('ovNetWorthSub').textContent =
       `${fmt(a.balances.SOL,4)} SOL (${(solVal/allocDenom*100).toFixed(1)}%) + ${fmtUsd(a.balances.USDC)} USDC`;
 
-    $('ovPnL').textContent = (a.realizedPnlUsd >= 0 ? '+' : '') + fmt(a.realizedPnlUsd) + ' $';
-    $('ovPnL').className = 'value num ' + pnlCls(a.realizedPnlUsd);
-    $('ovPnLSub').textContent = 'total fees ' + fmtUsd(a.feesPaidUsd || 0, 4);
+    // ALL-IN REALIZED, NET OF FEES: spot books (grid/DCA/memes) + the perps
+    // sleeve, fees subtracted. The old tile showed gross account.realizedPnlUsd
+    // while labelled "after fees" — it overstated by every fee paid. The perps
+    // contribution is broken out so it is never hidden inside the total.
+    const comb = (s.perf && s.perf.combined) || null;
+    const totReal = comb ? comb.totalRealizedNetUsd : (a.realizedPnlUsd || 0) - (a.feesPaidUsd || 0);
+    $('ovPnL').textContent = (totReal >= 0 ? '+' : '') + fmt(totReal) + ' $';
+    $('ovPnL').className = 'value num ' + pnlCls(totReal);
+    $('ovPnLSub').textContent = comb
+      ? `net after fees · spot ${fmtUsd(comb.spotRealizedNetUsd)} + perps ${fmtUsd(comb.perpsRealizedNetUsd)}`
+      : 'net after fees';
 
-    const unreal = s.risk.unrealizedPnlUsd;
+    // Unrealized likewise all-in: open spot basket + the open perps hedge's
+    // net PnL, so the tile reflects everything the bot currently holds.
+    const unreal = comb ? comb.totalUnrealizedUsd : s.risk.unrealizedPnlUsd;
     $('ovUnreal').textContent = (unreal >= 0 ? '+' : '') + fmt(unreal) + ' $';
     $('ovUnreal').className = 'value num ' + pnlCls(unreal);
-    $('ovUnrealSub').textContent = 'open basket vs avg cost';
+    $('ovUnrealSub').textContent = comb
+      ? `open basket ${fmtUsd(comb.spotUnrealizedUsd)} + perps ${fmtUsd(comb.perpsUnrealizedUsd)}`
+      : 'open basket vs avg cost';
 
     // "24h" change under the price tile is the REAL 24h price change from the
     // oracle's 24h-ago sample — never equity growth (deposits made that read
@@ -897,8 +909,20 @@
         <td>${(b.winRate*100).toFixed(0)}%</td>
         <td>${pf}</td></tr>`;
     }
+    const comb = p.combined;
+    const c = (v) => v > 0 ? 'pos' : v < 0 ? 'neg' : '';
+    const combo = comb
+      ? `<div style="font-size:12px;margin-bottom:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--panel2)">
+           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+             <div><div style="color:var(--dim);font-size:11px">All-in realized (net)</div><div class="${c(comb.totalRealizedNetUsd)} num" style="font-weight:700">${fmt$(comb.totalRealizedNetUsd)}</div></div>
+             <div><div style="color:var(--dim);font-size:11px">All-in open (net)</div><div class="${c(comb.totalUnrealizedUsd)} num" style="font-weight:700">${fmt$(comb.totalUnrealizedUsd)}</div></div>
+             <div><div style="color:var(--dim);font-size:11px">Grand total</div><div class="${c(comb.grandTotalUsd)} num" style="font-weight:700">${fmt$(comb.grandTotalUsd)}</div></div>
+           </div>
+           <div style="color:var(--dim);font-size:11px;margin-top:6px">Perps contribution to realized net: <b class="${c(comb.perpsRealizedNetUsd)}">${fmt$(comb.perpsRealizedNetUsd)}</b> (${(comb.perpsSharePct*100).toFixed(0)}%)</div>
+         </div>`
+      : '';
     el.innerHTML = rows
-      ? `<div style="font-size:11px;color:var(--dim);margin-bottom:8px">Window: <b>${winLabel}</b></div>
+      ? combo + `<div style="font-size:11px;color:var(--dim);margin-bottom:8px">Window: <b>${winLabel}</b></div>
          <table style="width:100%">
            <tr><th align="left">Book</th><th align="right">Realized</th><th align="right">Fees</th><th align="right">Net</th><th align="right">Fills</th><th align="right">Win%</th><th align="right">PF</th></tr>
            ${rows}</table>`
