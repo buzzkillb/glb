@@ -81,9 +81,11 @@ export class StrategyEngine {
     // (Same definition the store's equity curve uses — never invented.)
     const equityUsd = (acc.balances?.USDC ?? 0) + (acc.balances?.SOL ?? 0) * price;
     const sig: RegimeSignals = {
-      // Oracle returns realized volatility as a FRACTION (std/mean); convert to
-      // percent to match the policy bounds. 0 means "unknown" and fails safe.
-      volPct: this.priceOracle.recentVolatility() * 100,
+      // Tradable amplitude: the REAL on-chain 24h high/low range. 12-candle std
+      // measures micro-noise, not the move worth harvesting; the range the tape
+      // actually offered is the honest input for TP sizing and perps risk. A 0
+      // (unknown window) fails the derivation safe.
+      volPct: this.priceOracle.rangeAmplitudePct(1440),
       trendPct: this.priceOracle.recentTrend() * 100,
       momentum24HPct: this.marketMomentum24H(),
       volumeUsd: this.marketVolumeUsd(),

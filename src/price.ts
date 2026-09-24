@@ -216,6 +216,20 @@ export class PriceOracle extends EventEmitter {
   }
 
   /**
+   * Tradable amplitude over the last `minutes`, as a PERCENT of the low:
+   * (recentHigh - recentLow) / recentLow * 100, from the same REAL on-chain DEX
+   * history the grid band uses. This is the range the market is actually
+   * offering to trade — the right input for sizing take-profits and perps risk.
+   * Returns 0 when the window is unknown, which fails the lever derivation safe.
+   */
+  rangeAmplitudePct(minutes = 1440): number {
+    const hi = this.recentHigh(minutes);
+    const lo = this.recentLow(minutes);
+    if (!(hi > 0) || !(lo > 0)) return 0;
+    return ((hi - lo) / lo) * 100;
+  }
+
+  /**
    * Rolling VWAP over recent closes. PREFERS the real on-chain GeckoTerminal
    * candles, which carry genuine volumeUsd from the pool (OHLCV row index 5).
    * Only if history is empty (no synthetic volume is ever invented) we fall

@@ -100,8 +100,8 @@ export const DEFAULT_DYNAMIC_LEVERS: DynamicLeversConfig = {
   dcaTrailBasePct: 4,
   feeMult: 3,
   tpVolShare: 0.8,
-  gridCompoundMaxPct: 2,
-  gridCompoundBase: 0.2,
+  gridCompoundMaxPct: 1,
+  gridCompoundBase: 0.15,
   gridCompoundProfitMult: 0.6,
   volTargetPct: 0.03,
   perpsEquityMinPct: 0.02,
@@ -182,7 +182,7 @@ export function deriveLevers(
   // tape is calm enough that larger levels are likely to fill. Grows with the
   // realised-profit / equity ratio; clamped to a policy ceiling.
   const profitRatio = equity > 0 ? Math.max(0, sig.realizedProfitUsd) / equity : 0;
-  const calmFactor = clamp(volTarget / volPct, 0.5, 2);
+  const calmFactor = clamp(volTarget / volPct, 0.5, 1.5);
   const gridCompound = clamp(
     (bound(cfg.gridCompoundBase, 0.2) + profitRatio * bound(cfg.gridCompoundProfitMult, 0.6)) * calmFactor,
     0,
