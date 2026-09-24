@@ -15,7 +15,12 @@ import { join } from 'node:path';
  * No secrets are logged. No synthetic data — events are real trade/risk signals.
  */
 
-const EVENT_LOG = join(process.cwd(), '.botstate', 'events.log');
+// Resolved lazily so an explicit override (tests, alternate deployments) takes
+// effect even when set after this module is imported. Never a hardcoded path.
+function eventLogPath(): string {
+  const dir = process.env.BOT_STATE_DIR || join(process.cwd(), '.botstate');
+  return join(dir, 'events.log');
+}
 
 function config(): { enabled: boolean; token: string; chatId: string } {
   const token = process.env.TELEGRAM_BOT_TOKEN ?? '';
@@ -25,8 +30,9 @@ function config(): { enabled: boolean; token: string; chatId: string } {
 
 function logEvent(line: string): void {
   try {
-    mkdirSync(join(process.cwd(), '.botstate'), { recursive: true });
-    appendFileSync(EVENT_LOG, `${new Date().toISOString()} ${line}\n`, { encoding: 'utf8', mode: 0o600 });
+    const path = eventLogPath();
+    mkdirSync(join(process.env.BOT_STATE_DIR || join(process.cwd(), '.botstate')), { recursive: true });
+    appendFileSync(path, `${new Date().toISOString()} ${line}\n`, { encoding: 'utf8', mode: 0o600 });
   } catch {
     /* never block the trading loop on a log write */
   }

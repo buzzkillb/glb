@@ -27,8 +27,14 @@ import { join } from 'node:path';
 import type { Trade } from './types.js';
 import { readJournal, readEquityArchive, type EquitySample } from './journal.js';
 
-const STATE_DIR = join(process.cwd(), '.botstate');
-const HISTORY_FILE = join(STATE_DIR, 'history-sol.json');
+// Resolved lazily so an explicit override (tests, alternate deployments) takes
+// effect even when set after this module is imported. Never a hardcoded path.
+function stateDir(): string {
+  return process.env.BOT_STATE_DIR || join(process.cwd(), '.botstate');
+}
+function historyFile(): string {
+  return join(stateDir(), 'history-sol.json');
+}
 
 /** One UTC day of SOL-book trading, aggregated from real fills. */
 export interface DayRollup {
@@ -140,8 +146,8 @@ export class HistoryStore {
 
   private load(): void {
     try {
-      if (existsSync(HISTORY_FILE)) {
-        const raw = JSON.parse(readFileSync(HISTORY_FILE, 'utf8')) as { version?: number; days?: Record<string, DayRollup> };
+      if (existsSync(historyFile())) {
+        const raw = JSON.parse(readFileSync(historyFile(), 'utf8')) as { version?: number; days?: Record<string, DayRollup> };
         if (raw && typeof raw.days === 'object') {
           this.days = raw.days;
         }
@@ -153,11 +159,12 @@ export class HistoryStore {
 
   private save(): void {
     try {
-      mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+      mkdirSync(stateDir(), { recursive: true, mode: 0o700 });
       const payload: HistoryFile = { version: 2, days: this.days };
-      const tmp = HISTORY_FILE + '.tmp';
+      const file = historyFile();
+      const tmp = file + '.tmp';
       writeFileSync(tmp, JSON.stringify(payload), { encoding: 'utf8', mode: 0o600 });
-      renameSync(tmp, HISTORY_FILE); // atomic on POSIX
+      renameSync(tmp, file); // atomic on POSIX
     } catch (e) {
       console.warn(`[history] write failed: ${(e as Error).message}`);
     }

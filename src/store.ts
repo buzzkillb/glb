@@ -26,7 +26,11 @@ import {
   type CostBasisResult,
 } from './journal.js';
 
-const STATE_DIR = join(process.cwd(), '.botstate');
+// Resolved lazily so an explicit override (tests, alternate deployments) takes
+// effect even when set after this module is imported. Never a hardcoded path.
+function stateDir(): string {
+  return process.env.BOT_STATE_DIR || join(process.cwd(), '.botstate');
+}
 
 /** Coarse cadence for the forever equity archive (15 min). */
 const EQUITY_ARCHIVE_MS = 15 * 60_000;
@@ -617,7 +621,7 @@ export class StateStore extends EventEmitter {
 
   /** Name the state file per mode so paper and live never clobber each other. */
   private static fileFor(mode: string): string {
-    return join(STATE_DIR, `state-${mode}.json`);
+    return join(stateDir(), `state-${mode}.json`);
   }
 
   /** Restore persisted state into this fresh store (called once at construct). */
@@ -843,7 +847,7 @@ export class StateStore extends EventEmitter {
   persistNow(): void {
     if (!StateStore.enabled()) return;
     try {
-      mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+      mkdirSync(stateDir(), { recursive: true, mode: 0o700 });
       // SECURITY (audit M2): state files contain balances/PnL/orders — restrict
       // to owner-only so other local users on a shared machine can't read them.
       // ATOMICITY (audit #3): write a sibling temp file then rename over the

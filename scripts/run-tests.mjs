@@ -12,13 +12,23 @@
 //
 //   npm test           run every test/*.test.ts
 //   npm run test:live  run test/live.test.ts with RUN_LIVE_TX_TESTS=1
-import { readdirSync } from 'node:fs';
+import { readdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const live = process.argv.includes('--live');
+
+// ---------------------------------------------------------------------------
+// STATE ISOLATION — tests must NEVER touch the real .botstate.
+// ---------------------------------------------------------------------------
+// A test that books a fill through the store would otherwise append it to the
+// live journal (trades-live.jsonl) and emit fake events into events.log,
+// polluting tracking/accounting with synthetic "test-sell" rows. Point every
+// state path at a throwaway temp dir for the whole run, then delete it.
+const testStateDir = mkdtempSync(path.join(os.tmpdir(), 'gridlord-test-state-'));
 
 const files = live
   ? ['test/live.test.ts']
@@ -27,12 +37,24 @@ const files = live
       .sort()
       .map((f) => path.join('test', f));
 
-const env = { ...process.env };
+const env = {
+  ...process.env,
+  // Isolate all persistent state into the temp dir so tests cannot pollute the
+  // real journal, event log, history rollups, or bot state files.
+  BOT_STATE_DIR: testStateDir,
+  PERP_STATE_DIR: testStateDir,
+};
 if (live) env.RUN_LIVE_TX_TESTS = '1';
 
-const result = spawnSync(
-  process.execPath,
-  ['--experimental-detect-module', '--import', 'tsx', '--test', ...files],
-  { cwd: root, env, stdio: 'inherit' }
-);
-process.exit(result.status ?? 1);
+let status = 1;
+try {
+  const result = spawnSync(
+    process.execPath,
+    ['--experimental-detect-module', '--import', 'tsx', '--test', ...files],
+    { cwd: root, env, stdio: 'inherit' }
+  );
+  status = result.status ?? 1;
+} finally {
+  try { rmSync(testStateDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+}
+process.exit(status);
