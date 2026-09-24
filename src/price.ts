@@ -101,8 +101,8 @@ export function corroboratedMedian(
  * flowing during a transient quote API blip, with a clear log.)
  *
  * HISTORY: seeded from GeckoTerminal's on-chain DEX OHLCV (SOL/USDC pool), so
- * the grid band sizes itself from REAL recent price action ($68–100 range, not
- * static numbers) and keeps refreshing through the day.
+ * the grid band sizes itself from REAL recent price action (live DEX candles,
+ * never static numbers) and keeps refreshing through the day.
  */
 export class PriceOracle extends EventEmitter {
   private price = 0;
@@ -317,8 +317,8 @@ export class PriceOracle extends EventEmitter {
   async refreshHistory(): Promise<void> {
     const pool = process.env.GEOKT_POOL || '58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2';
     try {
-      // Daily candles for the longer-term range (covers $68–100), 24h-hourly for
-      // finer recent detail. Merge, sort ascending, dedupe by bucket.
+      // Daily candles for the longer-term range, 24h-hourly for finer recent
+      // detail. Merge, sort ascending, dedupe by bucket.
       const day = await this.fetchOhlcv(pool, 'day', 1, 30);
       const hour = await this.fetchOhlcv(pool, 'hour', 1, 48);
       const merged = new Map<number, Candle>();

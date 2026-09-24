@@ -288,7 +288,8 @@ export class StateStore extends EventEmitter {
     // Book the trim as a reconciliation adjustment, NOT as fees: real network
     // fees are already captured per-trade (recordTrade). Valuing the inventory
     // correction at spot inflated feesPaidUsd (e.g. a 5 SOL trim during a
-    // rally logged as ~$560 of "fees"), making per-strategy Net dishonest.
+    // rally logged as a large fabricated "fee"), making per-strategy Net
+    // dishonest.
     if (g && gq > 0) {
       const share = gq / total;
       g.baseQty -= trim * share;

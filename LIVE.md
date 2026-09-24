@@ -10,7 +10,7 @@ Every strategy BUYS with **USDC** (SOL grid & DCA buy SOL for USDC; CYB buys
 CYB for USDC). Native SOL is only used for network/priority fees plus the grid's
 SELL legs. So fund the wallet with **mostly USDC + a little native SOL**.
 
-For a **15 SOL (~$1,640) wallet** at ~$109:
+For a **hypothetical example** (15 SOL at $109, ≈$1,640 equity):
 - **Convert ~13.5 SOL → ~$1,470 USDC** (working capital)
 - **Keep ~1.5 – 2 SOL native** (fees + sell inventory)
 
@@ -18,7 +18,8 @@ For a **15 SOL (~$1,640) wallet** at ~$109:
 
 On live startup the bot reads your **actual on-chain SOL + USDC balances**, grabs
 a live SOL price, and derives every budget as a **% of total equity** — no more
-hardcoded caps. It prints a startup report, e.g. for a ~$1,640 wallet:
+hardcoded caps. It prints a startup report whose numbers come entirely from your
+wallet at that moment. Illustrative layout (not this bot's state):
 
 ```
 ─ Wallet sizing (derived from real balances) ─

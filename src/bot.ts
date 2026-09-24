@@ -122,7 +122,9 @@ async function main(): Promise<void> {
     const { price, account } = s;
     console.log(
       `[${new Date(s.ts).toLocaleTimeString()}] SOL ${price.toFixed(2)} | ` +
-        `PnL ${account.realizedPnlUsd.toFixed(2)} | ` +
+        // Print NET (realized minus fees), the same figure the dashboard shows
+        // as all-in net — the gross tape figure would overstate by every fee.
+        `PnL ${(account.realizedPnlUsd - (account.feesPaidUsd || 0)).toFixed(2)} | ` +
         `open ${account.openQty.toFixed(4)} SOL | ` +
         `order ${s.orders.filter((o: { status: string }) => o.status === 'OPEN').length} | ` +
         (s.risk.paused ? 'PAUSED' : 'running')

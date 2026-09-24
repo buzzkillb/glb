@@ -269,8 +269,8 @@ export interface PerpSleeveConfig {
   cashUsePct: number;
   /**
    * Deployable fraction of the sleeve's OWN banked realized PnL (read live from
-   * the trade tape). This is the "+$521.10 since inception" path — realized PnL
-   * already banked, so it is safe to risk on a hedge. 0 disables it. Never
+   * the trade tape). This is the "banked realized PnL since inception" path —
+   * profit already realized, so it is safe to risk on a hedge. 0 disables it. Never
    * negative, never exceeds liquid cash.
    */
   realizedProfitUsePct: number;
