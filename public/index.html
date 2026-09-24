@@ -441,6 +441,11 @@
         <div class="card"><div class="k">Open position net PnL (after carry)</div><div class="v" id="pUnrealNet">—</div></div>
       </div>
       <div class="card" style="margin-top:12px">
+        <div class="k">Open position net PnL over time <span class="muted">(the hedge's live trajectory)</span></div>
+        <svg id="pPnlSpark" viewBox="0 0 600 120" preserveAspectRatio="none" style="width:100%;height:120px;display:block;margin-top:6px"></svg>
+        <div class="muted" id="pPnlSparkMeta" style="font-size:12px">waiting for samples…</div>
+      </div>
+      <div class="card" style="margin-top:12px">
         <div class="k">Last decision</div>
         <div class="v" id="pDecision" style="font-size:14px">—</div>
       </div>
@@ -1179,11 +1184,51 @@
     renderPerpsLedger();
   }
 
+  /**
+   * Sparkline of the open position's LIVE net PnL. Renders the archived
+   * trajectory (net of carry) so the operator can SEE whether the hedge is
+   * trending in our favour, not just read one snapshot. Null-safe and
+   * baseline-anchored: a dashed zero line makes loss/profit unambiguous.
+   */
+  function renderPnlSpark(series) {
+    const svg = $('pPnlSpark');
+    const meta = $('pPnlSparkMeta');
+    if (!svg || !meta) return;
+    const pts = (series || []).filter((x) => x && typeof x.netPnlUsd === 'number' && typeof x.ts === 'number');
+    if (pts.length < 2) {
+      svg.innerHTML = '';
+      meta.textContent = pts.length ? 'collecting samples (' + pts.length + ')…' : 'no samples yet — recorded about once a minute while a position is open';
+      return;
+    }
+    const W = 600, H = 120, pad = 10;
+    const vals = pts.map((x) => x.netPnlUsd);
+    let lo = Math.min.apply(null, vals.concat([0]));
+    let hi = Math.max.apply(null, vals.concat([0]));
+    if (hi - lo < 1e-6) hi = lo + 0.01;
+    const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts;
+    const span = Math.max(1, t1 - t0);
+    const xAt = function (t) { return pad + (W - 2 * pad) * ((t - t0) / span); };
+    const yAt = function (v) { return pad + (H - 2 * pad) * (1 - (v - lo) / (hi - lo)); };
+    const d = pts.map(function (x, i) {
+      return (i ? 'L' : 'M') + xAt(x.ts).toFixed(1) + ' ' + yAt(x.netPnlUsd).toFixed(1);
+    }).join(' ');
+    const last = vals[vals.length - 1];
+    const col = last >= 0 ? '#2fe6a0' : '#ff5570';
+    svg.innerHTML =
+      '<line x1="0" y1="' + yAt(0).toFixed(1) + '" x2="' + W + '" y2="' + yAt(0).toFixed(1) +
+      '" stroke="#5b6480" stroke-dasharray="4 4" stroke-width="1"/>' +
+      '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="2"/>';
+    meta.textContent =
+      'net ' + (last >= 0 ? '+$' : '-$') + fmt(Math.abs(last), 2) +
+      ' · ' + pts.length + ' samples over ' + Math.round(span / 60000) + ' min';
+  }
+
   async function renderPerpsLedger() {
     try {
       const res = await fetch('/api/perps/ledger');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const j = await res.json();
+      renderPnlSpark(j.pnlSeries);
       const rows = (j.history || []).slice().reverse();
       const tb = $('perpsLedgerTable').querySelector('tbody');
       const money = (v) => (v == null ? '—' : (v < 0 ? '-$' : '$') + fmt(Math.abs(v), 2));

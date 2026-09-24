@@ -45,6 +45,8 @@ export class PerpSleeve {
   private feedReject = '';
   /** Latest dynamic profit signal derived from the bot's own records. */
   private profit: ProfitSignal | null = null;
+  /** Last time we archived a live-PnL sample (throttles the sparkline series). */
+  private lastSampleAt = 0;
 
   constructor(
     private cfg: AppConfig,
@@ -318,6 +320,15 @@ export class PerpSleeve {
     const hoursHeld = Math.max(0, (Date.now() - pos.openedAt) / 3_600_000);
     const borrowUsd = borrowAccrualUsd(notional, p.hourlyBorrowPct, hoursHeld);
     const netPnl = pnl - borrowUsd; // PnL the safety ceilings must judge
+
+    // Archive a timed sample of the live PnL so the dashboard can plot the
+    // hedge's actual trajectory rather than a single snapshot. Throttled to one
+    // sample a minute so a fast tick loop cannot flood the bounded series (and
+    // so the sparkline spans real time, not sub-second noise).
+    if (Date.now() - this.lastSampleAt >= 60_000) {
+      this.lastSampleAt = Date.now();
+      this.ledger.samplePnl({ ts: Date.now(), netPnlUsd: netPnl, priceUsd: mark });
+    }
 
     const stopUsd = pos.collateralUsd * p.stopLossMarginPct;
 
@@ -621,7 +632,7 @@ export class PerpSleeve {
   }
 
   /** Perps ledger tape (open/close/halt/reject) for the dashboard tab. */
-  ledgerView(): { halted: boolean; haltReason: string; realizedPnlUsd: number; feesPaidUsd: number; principalFloorUsd: number; outstandingMarginUsd: number; peakEquityUsd: number; history: unknown[] } {
+  ledgerView(): { halted: boolean; haltReason: string; realizedPnlUsd: number; feesPaidUsd: number; principalFloorUsd: number; outstandingMarginUsd: number; peakEquityUsd: number; history: unknown[]; pnlSeries: unknown[] } {
     const l = this.ledger.snapshotLedger();
     return {
       halted: l.halted,
@@ -632,6 +643,7 @@ export class PerpSleeve {
       outstandingMarginUsd: l.outstandingMarginUsd,
       peakEquityUsd: l.peakEquityUsd,
       history: l.history.slice(-100),
+      pnlSeries: l.pnlSeries.slice(-180),
     };
   }
 

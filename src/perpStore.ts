@@ -72,6 +72,22 @@ export interface PerpLedger {
   haltReason: string;
   lastActionAt: number;
   history: PerpHistoryEntry[];
+  /**
+   * Rolling samples of the OPEN position's live PnL while it is held, so the
+   * dashboard can plot how the hedge is actually doing over time instead of a
+   * single snapshot. Bounded; cleared when the position closes (a new trade
+   * starts a fresh series so old and new PnL are never conflated).
+   */
+  pnlSeries: PerpPnlSample[];
+}
+
+/** One timed observation of an open position's mark PnL. */
+export interface PerpPnlSample {
+  ts: number;
+  /** Net PnL (USD) incl. carry — exactly what the stop/take-profit judge. */
+  netPnlUsd: number;
+  /** Mark price at the sample, for context. */
+  priceUsd: number;
 }
 
 const EMPTY: PerpLedger = {
@@ -86,6 +102,7 @@ const EMPTY: PerpLedger = {
   haltReason: '',
   lastActionAt: 0,
   history: [],
+  pnlSeries: [],
 };
 
 export class PerpStore {
@@ -174,7 +191,24 @@ export class PerpStore {
 
   setPosition(p: PerpPosition | null): void {
     this.ledger.position = p;
+    // A closed position starts a fresh PnL series on the next open, so the
+    // sparkline never splices two different trades into one misleading line.
+    if (!p) this.ledger.pnlSeries = [];
     this.setOutstanding(p ? p.collateralUsd : 0);
+  }
+
+  /**
+   * Append a timed PnL observation for the open position. Bounded ring so the
+   * ledger stays a safety record, not an unbounded log; the dashboard reads the
+   * tail for the sparkline.
+   */
+  samplePnl(entry: PerpPnlSample): void {
+    this.ledger.pnlSeries.push(entry);
+    const cap = 720; // ~6h at a 30s tick, enough for a readable curve
+    if (this.ledger.pnlSeries.length > cap) {
+      this.ledger.pnlSeries.splice(0, this.ledger.pnlSeries.length - cap);
+    }
+    this.save();
   }
 
   setHalt(reason: string): void {
