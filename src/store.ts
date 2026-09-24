@@ -63,6 +63,8 @@ function emptyPerpsState(): import('./types.js').PerpsState {
     sleeveBudgetUsd: 0,
     edgePct: 0,
     gridNetLongUsd: 0,
+    plannedAccumUsd: 0,
+    hedgeableExposureUsd: 0,
     exposurePct: 0,
     hedgeActive: false,
     hedgeCoveragePct: 0,

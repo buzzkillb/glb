@@ -418,6 +418,10 @@
         <div class="card"><div class="k">Exposure</div><div class="v" id="pExposure">—</div></div>
       </div>
       <div class="row2">
+        <div class="card"><div class="k">Planned grid/DCA buys</div><div class="v" id="pPlanned">—</div></div>
+        <div class="card"><div class="k">Hedge targets (incl. planned)</div><div class="v" id="pHedgeable">—</div></div>
+      </div>
+      <div class="row2">
         <div class="card"><div class="k">Exposure cap (kept)</div><div class="v" id="pExpCap">—</div></div>
         <div class="card"><div class="k">Trim target (excess)</div><div class="v" id="pTrimTarget">—</div></div>
       </div>
@@ -1131,6 +1135,10 @@
     set('pFills', (pr.sampleFills || 0) + (pr.ready ? ' (ready)' : ' (need more)'), pr.ready ? 'pos' : 'muted');
     set('pGridLong', money(p.gridNetLongUsd));
     set('pExposure', pctv(p.exposurePct), p.exposurePct >= 0.15 ? 'warn' : '');
+    // Grid/DCA-aware: the hedge is sized to actual exposure PLUS the spot books'
+    // pending accumulation, so dip buys into a decline are already covered.
+    set('pPlanned', p.plannedAccumUsd > 0 ? money(p.plannedAccumUsd) : '— none pending', p.plannedAccumUsd > 0 ? 'warn' : 'muted');
+    set('pHedgeable', money(p.hedgeableExposureUsd) + (p.plannedAccumUsd > 0 ? ' (incl. planned)' : ''), p.plannedAccumUsd > 0 ? 'warn' : '');
     // We deliberately do NOT delta-neutral the whole bag: the cap is the exposure
     // we are happy to keep, and the trim targets only the excess above it.
     set('pExpCap', pctv(p.maxNetExposurePct) + ' · ' + money(p.exposureCapUsd), p.withinExposureCap ? 'pos' : 'warn');

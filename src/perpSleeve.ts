@@ -86,6 +86,55 @@ export class PerpSleeve {
     return Math.max(0, qty * mark);
   }
 
+  /**
+   * GRID/DCA-AWARE OUTLOOK: the SOL exposure the spot books are ABOUT TO ADD.
+   *
+   * Hedging only today's inventory is reactive — a crash cancels nothing, and
+   * the grid/DCA dip buys fill *into* the falling market, so by the time we
+   * re-size the hedge the new SOL is already unhedged. This estimates the
+   * planned accumulation from the bot's own working orders and schedule:
+   *   - grid buy levels armed BELOW the mark (their budget is about to fill), and
+   *   - the DCA next-dip buy (one scheduled slice).
+   * Returning it lets the hedge target cover where exposure is heading, not just
+   * where it stands. Derived from real state; 0 when nothing is pending.
+   */
+  private plannedSpotAccumUsd(mark: number): number {
+    if (!(mark > 0)) return 0;
+    let planned = 0;
+
+    // Grid: count buy levels whose price sits at/below the mark (a dip would
+    // fill them) and add the per-level budget the sizer would deploy.
+    const grid = this.store.strategies.grid;
+    const levels = grid.levels ?? [];
+    const g = this.cfg.strategies.grid;
+    // Per-level buy budget: the auto-sizer rewrites cfg.usdcPerGrid from the
+    // live wallet, so the configured value IS the wallet-derived value here.
+    const perLevel = g.usdcPerGrid ?? 0;
+    // A dip below the mark would fill any buy level beneath it that we do not
+    // hold yet — that notional is about to become real SOL exposure.
+    const armedBelow = levels.filter((l) => l.price > 0 && l.price <= mark && !l.buyOrderId).length;
+    planned += Math.max(0, armedBelow) * Math.max(0, perLevel);
+
+    // DCA: one scheduled slice that the dip/VA path would deploy on the next
+    // decline. Cap it at the configured per-buy notional when no wallet sizing.
+    const dca = this.cfg.strategies.dca;
+    // Likewise wallet-derived by the sizer.
+    const perBuy = dca.usdcAmountPerBuy ?? 0;
+    if (dca.enabled) planned += Math.max(0, perBuy);
+
+    return Math.max(0, planned);
+  }
+
+  /**
+   * Hedge-target exposure including planned spot accumulation. This is the
+   * number the hedge should be sized against so grid/DCA buying INTO a decline
+   * is already covered — the difference between a hedge that protects the whole
+   * position and one that perpetually lags a dipping book.
+   */
+  private hedgeExposureUsd(mark: number): number {
+    return this.gridNetLongUsd(mark) + this.plannedSpotAccumUsd(mark);
+  }
+
   private equityUsd(): number {
     // Reuse the store's own chain-vs-books equity calc (spot book only), then
     // add back the sleeve's own open-position equity. Posting margin moves USDC
@@ -238,6 +287,9 @@ export class PerpSleeve {
       equityUsd: equity,
       ledger: this.ledger.snapshotLedger(),
       gridNetLongUsd: this.gridNetLongUsd(mark.price),
+      // Anticipate the spot books' pending accumulation so grid/DCA buys INTO a
+      // decline are covered by the hedge, not left unhedged until the next size.
+      plannedAccumUsd: this.plannedSpotAccumUsd(mark.price),
       markPrice: mark.price,
       vol24RangePct,
       // The venue returns priceChange24H as a USD delta (e.g. -0.06), NOT a
@@ -684,6 +736,7 @@ export class PerpSleeve {
     const equity = this.equityUsd();
     const mark = this.feed.lastPrice();
     const gridLong = mark > 0 ? this.gridNetLongUsd(mark) : 0;
+    const plannedAccum = mark > 0 ? this.plannedSpotAccumUsd(mark) : 0;
     const eligible = Math.max(0, equity - led.principalFloorUsd);
     // Deployable budget comes from the LIVE profit signal, not a stored floor,
     // net of margin already at work so the displayed number matches what can
@@ -706,7 +759,8 @@ export class PerpSleeve {
     // The spot net-long is the strategy's upside and working capital; forcing it
     // to zero costs leverage and carry for no reason.
     const exposureCapUsd = equity * Math.max(0, Math.min(1, p.maxNetExposurePct ?? 0));
-    const excessUsd = Math.max(0, gridLong - exposureCapUsd);
+    const hedgeableUsd = gridLong + plannedAccum;
+    const excessUsd = Math.max(0, hedgeableUsd - exposureCapUsd);
     // Leverage the hedge WOULD use right now, mirroring the auto-scaling in
     // decideSleeveAction: the smallest leverage that lets the deployable budget
     // reach the excess notional, bounded by the configured floor/ceiling. Used
@@ -766,6 +820,8 @@ export class PerpSleeve {
       sleeveBudgetUsd: budget,
       edgePct: equity > 0 ? budget / equity : 0,
       gridNetLongUsd: gridLong,
+      plannedAccumUsd: plannedAccum,
+      hedgeableExposureUsd: gridLong + plannedAccum,
       exposurePct: equity > 0 ? gridLong / equity : 0,
       hedgeActive: !!pos && pos.intent === 'hedge',
       hedgeCoveragePct:

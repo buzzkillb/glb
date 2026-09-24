@@ -100,6 +100,14 @@ export interface SleeveInputs {
   equityUsd: number;
   ledger: PerpLedger;
   gridNetLongUsd: number;
+  /**
+   * SOL exposure (USD) the spot books are ABOUT TO ADD: grid buy levels armed
+   * below the mark plus the next DCA dip slice. Hedging only today's inventory
+   * lags a dipping book — a crash fills those buys INTO the decline, so the new
+   * SOL would be unhedged until the next re-size. Targetting actual + planned
+   * covers where exposure is heading. 0 = nothing pending (reactive hedge only).
+   */
+  plannedAccumUsd?: number;
   /** Mark price from the perps venue feed (must be sane / > 0). */
   markPrice: number;
   /**
@@ -374,12 +382,18 @@ export function decideSleeveAction(
   // than the sleeve, and (c) giving up the edge the strategy exists to capture.
   // Instead we hedge only the EXCESS above cfg.maxNetExposurePct of equity, so
   // the book keeps its upside while the tail risk is capped.
-  const exposurePct = inputs.equityUsd > 0 ? inputs.gridNetLongUsd / inputs.equityUsd : 0;
+  // GRID/DCA-AWARE: size against the exposure we are ABOUT TO hold, not just
+  // what we hold now. Planned accumulation (armed grid levels below the mark +
+  // the next DCA slice) will fill into a decline, so hedging it now is what
+  // keeps the whole position covered instead of perpetually lagging the dip.
+  const plannedAccumUsd = Math.max(0, inputs.plannedAccumUsd ?? 0);
+  const hedgeableUsd = inputs.gridNetLongUsd + plannedAccumUsd;
+  const exposurePct = inputs.equityUsd > 0 ? hedgeableUsd / inputs.equityUsd : 0;
   const capUsd = inputs.equityUsd * clamp(cfg.maxNetExposurePct ?? 0, 0, 1);
   // Exposure over the cap that we want to shed. With maxNetExposurePct = 0 this
   // equals the full delta (old full-neutralization behavior).
-  const excessUsd = Math.max(0, inputs.gridNetLongUsd - capUsd);
-  if (exposurePct >= cfg.hedgeTriggerPct && inputs.gridNetLongUsd > 0 && excessUsd > 0) {
+  const excessUsd = Math.max(0, hedgeableUsd - capUsd);
+  if (exposurePct >= cfg.hedgeTriggerPct && hedgeableUsd > 0 && excessUsd > 0) {
     // hedgeRatio is a NOTIONAL fraction of the excess to offset, so the required
     // MARGIN is (targetNotional / leverage). Applying the ratio directly as
     // margin and then leveraging it would over-hedge by a factor of the leverage
@@ -408,7 +422,7 @@ export function decideSleeveAction(
     if (wantMargin >= PERP_MIN_COLLATERAL_USD) {
       const postExposurePct =
         inputs.equityUsd > 0
-          ? Math.max(0, inputs.gridNetLongUsd - wantMargin * lev) / inputs.equityUsd
+          ? Math.max(0, hedgeableUsd - wantMargin * lev) / inputs.equityUsd
           : 0;
       return {
         marginUsd: wantMargin,
@@ -416,8 +430,10 @@ export function decideSleeveAction(
         side: 'short',
         intent: 'hedge',
         reason: reachable
-          ? `trim net-long ${inputs.gridNetLongUsd.toFixed(0)}→${capUsd.toFixed(0)}USD at ${lev.toFixed(1)}x (exposure ${(exposurePct * 100).toFixed(0)}%→${(postExposurePct * 100).toFixed(0)}% of equity)`
-          : `partial trim net-long ${inputs.gridNetLongUsd.toFixed(0)}USD at ${lev.toFixed(1)}x (budget-bound)`,
+          ? `trim net-long ${hedgeableUsd.toFixed(0)}→${capUsd.toFixed(0)}USD at ${lev.toFixed(1)}x (exposure ${(exposurePct * 100).toFixed(0)}%→${(postExposurePct * 100).toFixed(0)}% of equity` +
+            (plannedAccumUsd > 0 ? `; incl ${plannedAccumUsd.toFixed(0)}USD planned grid/DCA buys)` : ')')
+          : `partial trim net-long ${hedgeableUsd.toFixed(0)}USD at ${lev.toFixed(1)}x (budget-bound` +
+            (plannedAccumUsd > 0 ? `; incl ${plannedAccumUsd.toFixed(0)}USD planned grid/DCA buys)` : ')'),
       };
     }
     return idle(`trim wanted ${wantMargin.toFixed(2)} < venue minimum`);

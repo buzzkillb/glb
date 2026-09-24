@@ -257,6 +257,14 @@ export interface PerpsState {
   edgePct: number;
   /** Grid-owned SOL inventory valued at mark (the thing a hedge neutralizes). */
   gridNetLongUsd: number;
+  /**
+   * SOL exposure the spot books are ABOUT TO ADD (armed grid levels below the
+   * mark + the next DCA slice). The hedge is sized to actual + planned so
+   * grid/DCA buying INTO a decline is already covered.
+   */
+  plannedAccumUsd: number;
+  /** (gridNetLongUsd + plannedAccumUsd) — the exposure the hedge targets. */
+  hedgeableExposureUsd: number;
   /** gridNetLongUsd / equity, 0..1 */
   exposurePct: number;
   hedgeActive: boolean;

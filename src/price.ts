@@ -31,6 +31,64 @@ export function pricePassesGate({
   return true;
 }
 
+/** Why a candidate print was not committed verbatim. */
+export type GateReason = 'ok' | 'non-positive' | 'single-jump' | 'outside-range';
+
+/**
+ * Classify (not just accept/reject) a candidate print so the caller can decide
+ * how hard to distrust it. Rejecting a single anomalous print outright — the old
+ * behaviour — froze the feed on a *genuine* sharp move: the venue kept returning
+ * the real new price and the oracle kept throwing it away as a "glitch". This
+ * classifier lets a repeated / corroborated print through while still dropping a
+ * one-off flash.
+ */
+export function classifyPrice({
+  p, prev, maxSingleJumpPct, historyHigh, historyLow,
+}: PriceGateInput): GateReason {
+  if (!(p > 0)) return 'non-positive';
+  if (prev > 0 && Math.abs(p - prev) / prev > maxSingleJumpPct) return 'single-jump';
+  if (historyHigh !== undefined && historyLow !== undefined && historyLow > 0 && historyHigh > 0) {
+    const cushion = (historyHigh - historyLow) * 0.5;
+    if (p < historyLow - cushion || p > historyHigh + cushion) return 'outside-range';
+  }
+  return 'ok';
+}
+
+/**
+ * Cross-source agreement check: given several INDEPENDENT quotes of the same
+ * asset, return the median of the ones that mutually agree within `tol`. A
+ * single outlier (a bad print, a stale cached page, a thin pool) is excluded as
+ * long as at least two sources corroborate each other. This is how we make
+ * pulling in external data *smart*: we never commit a lone number when multiple
+ * sources disagree, and we never trust one source's glitch.
+ *
+ * Returns null when fewer than the required number of sources agree.
+ */
+export function corroboratedMedian(
+  prints: { source: string; price: number }[],
+  tol = 0.01,
+  minAgree = 2
+): { price: number; sources: string[]; rejected: { source: string; price: number }[] } | null {
+  const good = prints.filter((x) => Number.isFinite(x.price) && x.price > 0);
+  if (good.length === 0) return null;
+  // Find the largest cluster of mutually-agreeing prints.
+  let best: { source: string; price: number }[] = [];
+  for (const seed of good) {
+    const cluster = good.filter((x) => Math.abs(x.price - seed.price) / seed.price <= tol);
+    if (cluster.length > best.length) best = cluster;
+  }
+  if (best.length < minAgree) return null;
+  const sorted = best.slice().sort((a, b) => a.price - b.price);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 ? sorted[mid].price : (sorted[mid - 1].price + sorted[mid].price) / 2;
+  const inCluster = new Set(best.map((x) => x.source));
+  return {
+    price: median,
+    sources: best.map((x) => x.source),
+    rejected: good.filter((x) => !inCluster.has(x.source)),
+  };
+}
+
 /**
  * Price oracle for SOL/USDC.
  *
@@ -64,6 +122,22 @@ export class PriceOracle extends EventEmitter {
   // Fixed notional quote (in SOL) used to compute the near-mid on-chain price.
   // Small enough to keep price impact negligible, large enough to be a real route.
   private readonly oracleAmountSol = 1;
+
+  // ---- Primary-source backoff --------------------------------------------------
+  // Jupiter is the venue we execute on, so it stays primary — but hammering it
+  // every poll while it is intermittently 400-ing/rate-limiting adds noise and
+  // keeps the circuit-breaker tripping on our own request pressure. On repeated
+  // failures we OPEN A COOLDOWN and stop calling it for a while, then probe once
+  // to see if it recovered. Success resets the streak immediately.
+  private jupFailStreak = 0;
+  private jupBackoffUntil = 0;
+
+  // ---- Confirmation buffer for anomalous prints --------------------------------
+  // A print that fails the single-jump gate is held here. If the SAME value
+  // (within tolerance) is seen on the next poll too, it is a real move being
+  // rejected by our guard, not a one-off flash — so we accept it. Anything that
+  // appears once and vanishes is dropped.
+  private pendingAnomaly: { price: number; seenAt: number; count: number } | null = null;
 
   constructor(private cfg: AppConfig) {
     super();
@@ -298,92 +372,202 @@ export class PriceOracle extends EventEmitter {
    */
   async fetchNow(): Promise<number> {
     const g = this.cfg.strategies.grid;
+    const prev = this.price;
     let p = 0;
     let source = 'jupiter';
+    const prints: { source: string; price: number }[] = [];
 
-    try {
-      const q = await this.jup.quote(
-        g.baseMint,
-        g.quoteMint,
-        this.oracleAmountSol,
-        'BUY'
-      );
-      // q.inAmount is SOL, q.outAmount is USDC -> price = USDC per SOL
-      if (q.inAmount > 0) {
-        p = q.outAmount / q.inAmount;
-        // PRIMARY execution venue refreshed successfully.
-        this._jupiterFresh = true;
-      }
-    } catch (e) {
-      // Jupiter (the venue we actually trade on) is down/erroring. Mark the
-      // execution venue as NOT fresh even though we may fall back to CoinGecko
-      // for a displayed price — the live circuit-breaker keys off this.
-      this._jupiterFresh = false;
-      this.emit('warn', `[price] on-chain jupiter quote failed (${(e as Error).message}); trying CoinGecko fallback …`);
-    }
-
-    // Fallback to CoinGecko if Jupiter gave us nothing usable.
-    if (!(p > 0)) {
-      source = 'coingecko';
+    // PRIMARY: Jupiter on-chain quote (the venue we execute on). Backed off
+    // rather than hammered: once it fails repeatedly we stop calling it every
+    // poll and probe only after a cooldown, so our own request pressure can't
+    // keep the venue API 400-ing or the circuit-breaker tripping.
+    const backoffActive = Date.now() < this.jupBackoffUntil;
+    if (!backoffActive) {
       try {
-        const res = await fetch(
-          'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
-          { signal: AbortSignal.timeout(15000) }
-        );
-        if (!res.ok) throw new Error(`coingecko HTTP ${res.status}`);
-        const json = (await res.json()) as { solana?: { usd?: number } };
-        p = json?.solana?.usd ?? 0;
+        const q = await this.jup.quote(g.baseMint, g.quoteMint, this.oracleAmountSol, 'BUY');
+        if (q.inAmount > 0 && q.outAmount > 0) {
+          const jupP = q.outAmount / q.inAmount;
+          prints.push({ source: 'jupiter', price: jupP });
+          this._jupiterFresh = true;
+          this.jupFailStreak = 0;
+          this.jupBackoffUntil = 0;
+        }
       } catch (e) {
-        this.fresh = false;
-        this.emit('error', e);
-        return this.price; // keep last known price
+        this._jupiterFresh = false;
+        this.jupFailStreak++;
+        // Exponential cooldown, capped at 2 min: 2 fails -> 10s, then 20s, 40s …
+        const cooldown = Math.min(120_000, 10_000 * 2 ** Math.max(0, this.jupFailStreak - 2));
+        this.jupBackoffUntil = Date.now() + cooldown;
+        this.emit(
+          'warn',
+          `[price] jupiter quote failed (${(e as Error).message}); backing off ${Math.round(cooldown / 1000)}s ` +
+            `(fail streak ${this.jupFailStreak}); using corroborated fallbacks`
+        );
+      }
+    } else if (this._jupiterFresh === false) {
+      // still inside cooldown — keep the venue marked not-fresh without retrying
+      this._jupiterFresh = false;
+    }
+
+    // FALLBACKS: independent keyless sources. We deliberately query MORE THAN ONE
+    // so a lone bad print can be discarded by cross-source agreement rather than
+    // trusted blindly. None of these is the execution venue, so a fallback price
+    // never counts as jupiterFresh.
+    if (prints.length === 0 || !this._jupiterFresh) {
+      const fb = await this.fetchFallbacks();
+      prints.push(...fb);
+    }
+
+    // SMART BAD-DATA HANDLING ---------------------------------------------------
+    // If a non-primary source disagrees wildly with the primary, drop it. If we
+    // only have non-primary sources, require at least two to corroborate each
+    // other (median) — a single unverified number is never committed.
+    let chosen = 0;
+    let chosenSource = source;
+    let corroborated = false;
+    if (prints.length >= 1) {
+      const primaryPrint = prints.find((x) => x.source === 'jupiter');
+      if (primaryPrint) {
+        // Primary exists: keep only prints that agree with it, then take their
+        // median (or just the primary when nothing else corroborates).
+        const agree = prints.filter((x) => Math.abs(x.price - primaryPrint.price) / primaryPrint.price <= 0.02);
+        const cm = corroboratedMedian(agree, 0.01, 1);
+        chosen = cm ? cm.price : primaryPrint.price;
+        chosenSource = primaryPrint.source;
+        corroborated = agree.length > 1;
+      } else {
+        const cm = corroboratedMedian(prints, 0.01, 2);
+        if (cm) {
+          chosen = cm.price;
+          chosenSource = cm.sources.join('+');
+          corroborated = true;
+          if (cm.rejected.length) {
+            this.emit('warn', `[price] discarded outlier ${cm.rejected.map((r) => r.source + '@' + r.price.toFixed(2)).join(', ')}`);
+          }
+        }
       }
     }
 
-    if (p > 0) {
-      // ----- SANITY GATE (protects every downstream strategy from a single
-      // bad/glitched quote). The ~$5.97 print on a ~$107 SOL triggered real
-      // grid crossed-fills + a DCA trailing sell at a fabricated price. Two
-      // independent guards decide whether to commit this value:
-      //   1) SINGLE-JUMP: >maxSingleJumpPct away from the last committed price
-      //      in ONE poll is nearly always an anomaly. Reject.
-      //   2) HISTORY CROSS-REF: way outside the traded 24h range is bogus. If
-      //      we have real on-chain history, reject a print far outside it.
-      // A genuine sharp move passes (it's within the last-committed gate and
-      // re-confirms across subsequent polls) while a one-off flash is dropped
-      // and the stream keeps the previous clean price.
-      const prev = this.price;
-      let hi: number | undefined;
-      let lo: number | undefined;
-      if (this.history.length > 0) {
-        hi = Math.max(...this.history.map((c) => c.high));
-        lo = Math.min(...this.history.map((c) => c.low));
-      }
-      const accepted = pricePassesGate({
-        p, prev, maxSingleJumpPct: this.cfg.risk.maxSingleJumpPct,
-        historyHigh: hi, historyLow: lo,
-      });
-      if (!accepted) {
-        this.fresh = false;
-        console.warn(
-          `[price] rejected suspicious print ${p.toFixed(2)} from ${source} ` +
-            `(last ${prev > 0 ? prev.toFixed(2) : 'n/a'}, jump ${prev > 0 ? ((p - prev) / prev * 100).toFixed(1) : 'n/a'}% > max ${(this.cfg.risk.maxSingleJumpPct * 100).toFixed(0)}%). Keeping prior price.`
-        );
-        this.emit('warn', `[price] rejected suspicious ${source} price ${p.toFixed(2)} (kept ${this.price.toFixed(2)})`);
+    if (!(chosen > 0)) {
+      this.fresh = false;
+      this.emit('warn', `[price] no source produced a usable price (last known: ${this.price}); using retained price.`);
+      return this.price;
+    }
+    p = chosen;
+    source = chosenSource;
+
+    // ----- GATE: classify rather than flat-reject ---------------------------------
+    let hi: number | undefined;
+    let lo: number | undefined;
+    if (this.history.length > 0) {
+      hi = Math.max(...this.history.map((c) => c.high));
+      lo = Math.min(...this.history.map((c) => c.low));
+    }
+    const verdict = classifyPrice({
+      p, prev, maxSingleJumpPct: this.cfg.risk.maxSingleJumpPct,
+      historyHigh: hi, historyLow: lo,
+    });
+
+    if (verdict !== 'ok') {
+      // Corroboration overrides a lone anomaly: if two independent sources agree
+      // on this value, it is a real move, not a flash — commit it.
+      if (corroborated) {
+        this.pendingAnomaly = null;
+        this.commit(p, source, prev);
         return this.price;
       }
-
-      this.price = p;
-      this.fresh = true;
-      this.pushCandle(p);
-      if (prev !== p) {
-        this.emit('price', p, source);
+      // Otherwise hold it. If the SAME anomalous value recurs on the next poll,
+      // our guard is rejecting a genuine move — accept the second sighting.
+      const a = this.pendingAnomaly;
+      const sameAgain = a && Math.abs(p - a.price) / a.price <= 0.005;
+      if (sameAgain) {
+        this.pendingAnomaly = null;
+        console.warn(`[price] ${verdict} print ${p.toFixed(2)} from ${source} recurred — treating as a genuine move.`);
+        this.commit(p, source, prev);
+        return this.price;
       }
-    } else {
+      this.pendingAnomaly = { price: p, seenAt: Date.now(), count: 1 };
       this.fresh = false;
-      this.emit('warn', `[price] no on-chain source produced a price (last known: ${this.price}); using retained price.`);
+      this.emit(
+        'warn',
+        `[price] held suspicious ${source} print ${p.toFixed(2)} (${verdict}; ` +
+          `last ${prev > 0 ? prev.toFixed(2) : 'n/a'}); awaiting confirmation`
+      );
+      return this.price;
     }
+
+    // Clean print.
+    this.pendingAnomaly = null;
+    this.commit(p, source, prev);
     return this.price;
+  }
+
+  /** Commit an accepted price to the stream. */
+  private commit(p: number, source: string, prev: number): void {
+    this.price = p;
+    this.fresh = true;
+    this.pushCandle(p);
+    if (prev !== p) this.emit('price', p, source);
+  }
+
+  /**
+   * Query independent keyless fallback sources and return their prints. We ask
+   * several so cross-source agreement can vouch for a value when the primary
+   * execution venue is unavailable; a single-source answer is flagged by the
+   * caller as uncorroborated and is never preferred over the venue.
+   */
+  private async fetchFallbacks(): Promise<{ source: string; price: number }[]> {
+    const out: { source: string; price: number }[] = [];
+    const tasks: Promise<void>[] = [];
+
+    // CoinGecko (USD).
+    tasks.push(
+      (async () => {
+        try {
+          const res = await fetch(
+            'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
+            { signal: AbortSignal.timeout(8000) }
+          );
+          if (!res.ok) return;
+          const json = (await res.json()) as { solana?: { usd?: number } };
+          const v = json?.solana?.usd ?? 0;
+          if (v > 0) out.push({ source: 'coingecko', price: v });
+        } catch { /* keep trying others */ }
+      })()
+    );
+
+    // Binance public ticker (USDT ≈ USD, no key).
+    tasks.push(
+      (async () => {
+        try {
+          const res = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT', {
+            signal: AbortSignal.timeout(8000),
+          });
+          if (!res.ok) return;
+          const json = (await res.json()) as { price?: string };
+          const v = Number(json?.price ?? 0);
+          if (v > 0) out.push({ source: 'binance', price: v });
+        } catch { /* keep trying others */ }
+      })()
+    );
+
+    // Coinbase spot (no key).
+    tasks.push(
+      (async () => {
+        try {
+          const res = await fetch('https://api.coinbase.com/v2/prices/SOL-USD/spot', {
+            signal: AbortSignal.timeout(8000),
+          });
+          if (!res.ok) return;
+          const json = (await res.json()) as { data?: { amount?: string } };
+          const v = Number(json?.data?.amount ?? 0);
+          if (v > 0) out.push({ source: 'coinbase', price: v });
+        } catch { /* keep trying others */ }
+      })()
+    );
+
+    await Promise.all(tasks);
+    return out;
   }
 
   private pushCandle(p: number): void {
