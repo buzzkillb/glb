@@ -3,6 +3,7 @@ import type { StateStore } from './store.js';
 import type { Broker } from './broker.js';
 import { PriceOracle } from './price.js';
 import type { Order } from './types.js';
+import type { DerivedLevers } from './regime.js';
 
 /**
  * Dollar-cost averaging: buys a fixed USDC amount of SOL on an interval, but
@@ -21,7 +22,21 @@ export class DcaStrategy {
     private store: StateStore,
     private broker: Broker,
     private priceOracle: PriceOracle
-  ) {}
+  ) {
+    this.levers = null;
+  }
+
+  /**
+   * Live market-derived levers, recomputed each poll by the engine from real
+   * volatility and the broker's own fee floor. When null/unusable the strategy
+   * falls back to its configured static baseline, so behavior never regresses.
+   */
+  private levers: DerivedLevers | null;
+
+  /** Install the latest derived levers (engine-driven; null clears to baseline). */
+  setLevers(l: DerivedLevers | null): void {
+    this.levers = l && l.usable ? l : null;
+  }
 
   /** Check whether it's time to buy; execute a market buy if so. */
   tick(): void {
@@ -94,11 +109,17 @@ export class DcaStrategy {
     // Keep a running peak of the highest price we've seen.
     if (!s.peakPrice || price > s.peakPrice) s.peakPrice = price;
 
-    const profitTrigger = avgCost * (1 + da.takeProfitPct / 100);
+    // DYNAMIC EXIT: the take-profit and trail distances are market-derived each
+    // poll (must clear the live fee floor by policy and capture a share of the
+    // live volatility range), falling back to the configured baseline only when
+    // the live signal is unavailable.
+    const tpPct = this.levers ? this.levers.dcaTakeProfitPct : da.takeProfitPct;
+    const trailPct = this.levers ? this.levers.dcaTrailingPct : da.trailingPct;
+    const profitTrigger = avgCost * (1 + tpPct / 100);
     if (!s.tpArmed && price >= profitTrigger) {
       s.tpArmed = true;
       s.peakPrice = price;
-      console.log(`[dca] TP armed @ ${price.toFixed(2)} (avg ${avgCost.toFixed(2)})`);
+      console.log(`[dca] TP armed @ ${price.toFixed(2)} (avg ${avgCost.toFixed(2)}, target +${tpPct.toFixed(2)}%, trail ${trailPct.toFixed(2)}%)`);
     }
 
     if (!s.tpArmed) return;
@@ -112,7 +133,7 @@ export class DcaStrategy {
       if (sinceTp < da.tpCooldownMinutes * 60_000) return;
     }
 
-    const trailBack = s.peakPrice! * (1 - da.trailingPct / 100);
+    const trailBack = s.peakPrice! * (1 - trailPct / 100);
     // PROFIT FLOOR (correctness): the whole point of a take-profit is to bank
     // a gain. If the trailing distance (DCA_TRAILING_PCT) is larger than the
     // arm threshold (DCA_TP_PCT) — e.g. arm +0.6%, trail 4% — the raw trail-back

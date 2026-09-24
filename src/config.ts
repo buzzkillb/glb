@@ -21,6 +21,10 @@ function normalizeJupiterUrl(value: string | undefined): string {
   return value;
 }
 
+import { DEFAULT_DYNAMIC_LEVERS, type DynamicLeversConfig } from './regime.js';
+export type { DynamicLeversConfig } from './regime.js';
+void DEFAULT_DYNAMIC_LEVERS;
+
 export interface GridConfig {
   baseAsset: string; // 'SOL'
   quoteAsset: string; // 'USDC'
@@ -416,6 +420,15 @@ export interface AppConfig {
    *  liquidity/24h-volume as a keyless fallback — we do NOT need its key, and
    *  we do NOT use CoinGecko for meme data at all. */
   birdeyeApiKey?: string;
+  /**
+   * DYNAMIC LEVER POLICY (no static strategy numbers). The engine derives every
+   * strategy knob (DCA take-profit/trail, grid compounding, perps margin share /
+   * profit share / hedge-leverage ceiling) each poll from LIVE market state.
+   * These fields are POLICY BOUNDS ONLY — risk tolerance and "how many times
+   * fees must be cleared" — never the answer itself. Optional so hand-built
+   * test configs stay valid; loadConfig always sets it.
+   */
+  dynamicLevers?: DynamicLeversConfig;
 }
 
 const envNumber = (key: string, fallback: number, min?: number, max?: number): number => {
@@ -599,6 +612,32 @@ export function loadConfig(): AppConfig {
       maxStalePricePolls: envNumber('RISK_MAX_STALE_POLLS', 5, 1, 1000),
       autoCircuitBreaker: envBool('RISK_AUTO_CIRCUIT_BREAKER', true),
       maxSingleJumpPct: envNumber('RISK_MAX_SINGLE_JUMP_PCT', 0.05, 0.02, 1),
+    },
+    // DYNAMIC LEVER POLICY. Every value here is a BOUND or a POLICY INTENT, not
+    // a result: the engine derives the actual take-profit %, trail %, compound
+    // %, and perps sizing from live volatility/fees each poll (see regime.ts).
+    dynamicLevers: {
+      enabled: envBool('DYNAMIC_LEVERS', true),
+      dcaTpMinPct: envNumber('DYN_DCA_TP_MIN_PCT', 0.6, 0.01, 100),
+      dcaTpMaxPct: envNumber('DYN_DCA_TP_MAX_PCT', 25, 0.1, 200),
+      dcaTrailMinPct: envNumber('DYN_DCA_TRAIL_MIN_PCT', 1.5, 0.1, 100),
+      dcaTrailMaxPct: envNumber('DYN_DCA_TRAIL_MAX_PCT', 25, 0.1, 200),
+      dcaTrailBasePct: envNumber('DYN_DCA_TRAIL_BASE_PCT', 4, 0.1, 100),
+      feeMult: envNumber('DYN_FEE_MULT', 3, 1, 100),
+      tpVolShare: envNumber('DYN_TP_VOL_SHARE', 0.8, 0.1, 10),
+      gridCompoundMaxPct: envNumber('DYN_GRID_COMPOUND_MAX_PCT', 2, 0, 50),
+      gridCompoundBase: envNumber('DYN_GRID_COMPOUND_BASE', 0.2, 0, 10),
+      gridCompoundProfitMult: envNumber('DYN_GRID_COMPOUND_PROFIT_MULT', 0.6, 0, 50),
+      volTargetPct: envNumber('DYN_VOL_TARGET_PCT', 0.03, 0.001, 1),
+      perpsEquityMinPct: envNumber('DYN_PERPS_EQUITY_MIN_PCT', 0.02, 0, 1),
+      perpsEquityMaxPct: envNumber('DYN_PERPS_EQUITY_MAX_PCT', 0.2, 0, 1),
+      perpsEquityBasePct: envNumber('DYN_PERPS_EQUITY_BASE_PCT', 0.1, 0, 1),
+      perpsProfitShareMinPct: envNumber('DYN_PERPS_PROFIT_SHARE_MIN_PCT', 0.25, 0, 1),
+      perpsProfitShareMaxPct: envNumber('DYN_PERPS_PROFIT_SHARE_MAX_PCT', 1, 0, 1),
+      perpsShareBasePct: envNumber('DYN_PERPS_SHARE_BASE_PCT', 0.6, 0, 1),
+      shareTrendMult: envNumber('DYN_PERPS_SHARE_TREND_MULT', 1.5, 0, 20),
+      perpsHedgeLeverageMaxCap: envNumber('DYN_PERPS_HEDGE_LEV_MAX_CAP', 3, 1, 20),
+      minVolumeUsd: envNumber('DYN_MIN_VOLUME_USD', 10_000_000, 0, 1e12),
     },
   };
 }

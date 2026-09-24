@@ -19,6 +19,7 @@ import {
 } from './perpStrategy.js';
 import type { PerpsState } from './types.js';
 import type { StateStore } from './store.js';
+import type { DerivedLevers } from './regime.js';
 
 /**
  * PERPS SLEEVE CONTROLLER.
@@ -213,8 +214,44 @@ export class PerpSleeve {
     }
   }
 
+  private levers: DerivedLevers | null = null;
+
+  /**
+   * Install the latest market-derived levers. The sleeve derives its margin
+   * share, profit share and hedge-leverage ceiling from live volatility and
+   * liquidity, so `setLevers` overrides the configured static baseline for this
+   * poll. When null/unusable the sleeve keeps its configured values.
+   */
+  setLevers(l: DerivedLevers | null): void {
+    this.levers = l && l.usable ? l : null;
+  }
+
+  /**
+   * Read-only live mark for the engine's dynamic-lever derivation. Returns null
+   * when the venue feed has nothing real to report — never a fabricated value.
+   */
+  markForEngine(): { price: number; priceChange24H: number; volumeUsd: number } | null {
+    const m = this.feed.mark();
+    if (!m || !(m.price > 0)) return null;
+    return { price: m.price, priceChange24H: m.priceChange24H, volumeUsd: m.volumeUsd };
+  }
+
   async tick(): Promise<void> {
-    const p = this.cfg.strategies.perps ?? DEFAULT_PERPS_CONFIG;
+    const base = this.cfg.strategies.perps ?? DEFAULT_PERPS_CONFIG;
+    // Market-derived sizing overrides for THIS poll: the margin share, profit
+    // share and hedge-leverage ceiling are computed from live volatility and
+    // liquidity by the engine. No usable signal => byte-identical baseline.
+    const p = this.levers
+      ? {
+          ...base,
+          profitSharePct: this.levers.perpsProfitSharePct,
+          maxEquityPct: this.levers.perpsMaxEquityPct,
+          hedgeLeverageMax: Math.min(
+            base.hedgeLeverageMax ?? base.hedgeLeverage ?? 1,
+            this.levers.perpsHedgeLeverageMax
+          ),
+        }
+      : base;
     if (!p.enabled) {
       // Still surface a live mark so the dashboard tab is informative rather
       // than blank while the sleeve is off. Read-only: no sizing, no orders.

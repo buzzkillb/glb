@@ -1,6 +1,7 @@
 import type { AppConfig } from './config.js';
 import type { StateStore } from './store.js';
 import type { Broker } from './broker.js';
+import type { DerivedLevers } from './regime.js';
 import type { PriceOracle } from './price.js';
 import type { Order } from './types.js';
 
@@ -62,6 +63,18 @@ export class GridStrategy {
   ) {}
 
   /**
+   * Live market-derived levers, recomputed each poll by the engine from real
+   * volatility and realized-profit ratio. When null/unusable the grid uses its
+   * configured static baseline, so behavior never regresses.
+   */
+  private levers: DerivedLevers | null = null;
+
+  /** Install the latest derived levers (engine-driven; null clears to baseline). */
+  setLevers(l: DerivedLevers | null): void {
+    this.levers = l && l.usable ? l : null;
+  }
+
+  /**
    * Adaptive band: from recent on-chain high/low, then volatility-adaptive
    * (Feature 2). Recent volatility scales the pad: choppy tape -> wider band,
    * calm tape -> tighter band, so steps are coarse enough to profit and we
@@ -96,9 +109,13 @@ export class GridStrategy {
     const g = this.cfg.strategies.grid;
     const base = g.usdcPerGrid || 20;
     const cap = this.cfg.risk.maxUsdcPosition;
-    // Feature 3 — compounding on cumulative realized PnL.
+    // Feature 3 — compounding on cumulative realized PnL. The compounding slope
+    // is market-derived each poll (larger when the tape is calm relative to the
+    // live volatility), falling back to the configured baseline when the live
+    // signal is unavailable.
     const pnl = this.store.account.realizedPnlUsd || 0;
-    const comp = Math.min(3, Math.max(0.5, 1 + g.compoundPct * (pnl / cap)));
+    const compoundPct = this.levers ? this.levers.gridCompoundPct : g.compoundPct;
+    const comp = Math.min(3, Math.max(0.5, 1 + compoundPct * (pnl / cap)));
     // Feature 5 — volatility-scaled sizing (1.0 at 3% realized vol).
     let vol = 1;
     if (g.volSizingEnabled) {

@@ -12,6 +12,7 @@ import { WalletSizer } from './sizer.js';
 import { JupiterExec, killLiveExecution, clearLiveExecution, liveExecutionKilled, dryRunEnabled } from './jupiter.js';
 import { notify } from './notify.js';
 import { unrealizedPauseCleared } from './riskGate.js';
+import { deriveLevers, feeFloorFraction, DEFAULT_DYNAMIC_LEVERS, type DerivedLevers, type RegimeSignals } from './regime.js';
 import type { Keypair } from '@solana/web3.js';
 
 const sizerRecheckMin = (): number => {
@@ -48,6 +49,73 @@ export class StrategyEngine {
    *  interval — a second tick would otherwise re-scan orders/risk mid-update
    *  and could double-send or double-count a fill. */
   private ticking = false;
+
+  /**
+   * Latest market-derived levers, recomputed at the start of every tick from
+   * live volatility, the broker's own fee floor, and realized-profit ratio.
+   * Pushed into the strategies; never persisted (always fresh).
+   */
+  private levers: DerivedLevers | null = null;
+  private lastLeverNote = '';
+
+  /**
+   * Derive every strategy lever from LIVE market state and hand it to the
+   * strategies for this poll. Policy bounds come from config; the actual
+   * take-profit / trail / compound / perps sizing are computed from the real
+   * volatility and fee floor. If a required live input is missing, the derived
+   * levers are unusable and every strategy keeps its configured baseline.
+   */
+  private updateDynamicLevers(): void {
+    const dl = this.cfg.dynamicLevers ?? DEFAULT_DYNAMIC_LEVERS;
+    if (!dl.enabled) {
+      this.levers = null;
+      this.grid.setLevers(null);
+      this.dca.setLevers(null);
+      this.perps?.setLevers(null);
+      return;
+    }
+    const price = this.store.price;
+    const feeStepUsd = price > 0 ? this.broker.minProfitStepUsd(price) : 0;
+    const acc = this.store.account;
+    // Equity is measured, not assumed: stable cash + native SOL marked live.
+    // (Same definition the store's equity curve uses — never invented.)
+    const equityUsd = (acc.balances?.USDC ?? 0) + (acc.balances?.SOL ?? 0) * price;
+    const sig: RegimeSignals = {
+      // Oracle returns realized volatility as a FRACTION (std/mean); convert to
+      // percent to match the policy bounds. 0 means "unknown" and fails safe.
+      volPct: this.priceOracle.recentVolatility() * 100,
+      trendPct: this.priceOracle.recentTrend() * 100,
+      momentum24HPct: this.marketMomentum24H(),
+      volumeUsd: this.marketVolumeUsd(),
+      feeFloorPct: feeFloorFraction(feeStepUsd, price),
+      equityUsd,
+      freeCashUsd: acc.balances?.USDC ?? 0,
+      realizedProfitUsd: acc.realizedPnlUsd ?? 0,
+      deployHeadroomUsd: Math.max(0, this.cfg.risk.maxUsdcPosition - this.store.totalDeployedUsd()),
+    };
+    const derived = deriveLevers(dl, sig);
+    this.levers = derived.usable ? derived : null;
+    this.grid.setLevers(this.levers);
+    this.dca.setLevers(this.levers);
+    this.perps?.setLevers(this.levers);
+    if (derived.usable && derived.explanation !== this.lastLeverNote) {
+      this.lastLeverNote = derived.explanation;
+      console.log(`[dynamic] levers: ${derived.explanation}`);
+    }
+  }
+
+  /** Live venue 24h momentum (fraction), from the perps mark feed; 0 = unknown. */
+  private marketMomentum24H(): number {
+    const m = this.perps?.markForEngine?.();
+    if (!m || !(m.price > 0)) return 0;
+    return Math.max(-1, Math.min(1, m.priceChange24H / m.price));
+  }
+
+  /** Live venue 24h volume (USD), from the perps mark feed; 0 = unknown. */
+  private marketVolumeUsd(): number {
+    const m = this.perps?.markForEngine?.();
+    return m?.volumeUsd ?? 0;
+  }
 
   constructor(
     private cfg: AppConfig,
@@ -210,6 +278,11 @@ export class StrategyEngine {
       // venue reports fresh again, resume live swaps without a process restart.
       clearLiveExecution();
     }
+
+    // DERIVE LEVERS: recompute every strategy knob from live market state
+    // BEFORE the strategies act, so take-profit/trail/compound/perps sizing all
+    // reflect the current tape rather than a static .env number.
+    this.updateDynamicLevers();
 
     // Initialize grid once we have a price
     if (!this.grid.isInitialized() && this.store.price > 0) {
