@@ -11,6 +11,7 @@ import { PerpSleeve } from './perpSleeve.js';
 import { WalletSizer } from './sizer.js';
 import { JupiterExec, killLiveExecution, clearLiveExecution, liveExecutionKilled, dryRunEnabled } from './jupiter.js';
 import { notify } from './notify.js';
+import { unrealizedPauseCleared } from './riskGate.js';
 import type { Keypair } from '@solana/web3.js';
 
 const sizerRecheckMin = (): number => {
@@ -286,9 +287,30 @@ export class StrategyEngine {
   }
 
   private applyHardStop(): void {
-    if (this.store.paused) return;
     const maxUsdc = this.cfg.risk.maxUsdcPosition;
     if (maxUsdc <= 0) return;
+
+    // (0) RECOVERY: the UNREALIZED draw-down pause is a transient condition, not
+    // a banked loss. If we latched paused on it (e.g. a bad price print, or a
+    // dip that has since recovered) and the open book is now within the
+    // threshold again, CLEAR it and resume. Without this the old behavior —
+    // returning early whenever paused — meant a single one-off underwater mark
+    // froze the bot permanently, forfeiting every future fill. The REALIZED
+    // hard-stop below is a banked loss and deliberately stays latched.
+    const unrealPct = this.cfg.risk.unrealizedHardStopPct;
+    const unreal = this.store.unrealizedPnlUsd();
+    if (unrealizedPauseCleared(this.store.paused, this.store.pauseReason, unreal, maxUsdc, unrealPct)) {
+      this.store.paused = false;
+      this.store.pauseReason = '';
+      console.warn(
+        `[risk] UNREALIZED draw-down cleared: open PnL ${unreal.toFixed(2)} no longer below -${(
+          maxUsdc * unrealPct
+        ).toFixed(2)}. Resuming deployment.`
+      );
+      notify('info', `✅ Unrealized draw-down cleared (open PnL ${unreal.toFixed(2)}). Bot resumed.`);
+    }
+
+    if (this.store.paused) return;
 
     // (1) REALIZED hard-stop: cumulative banked losses breach the cap.
     const realized = this.store.account.realizedPnlUsd;
@@ -310,9 +332,7 @@ export class StrategyEngine {
     // far beyond the realized stop before anything closes; halting new
     // deployment here stops us averaging into a falling knife. (Meme slots are
     // ring-fenced and handled inside their own strategy.)
-    const unrealPct = this.cfg.risk.unrealizedHardStopPct;
     if (unrealPct > 0) {
-      const unreal = this.store.unrealizedPnlUsd();
       if (unreal <= -maxUsdc * unrealPct) {
         this.store.paused = true;
         this.store.pauseReason = `unrealized loss ${unreal.toFixed(2)} <= -${(
