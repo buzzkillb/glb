@@ -210,9 +210,10 @@ export function deriveLevers(
 
   // --- Hedge leverage ceiling: deep books tolerate the policy cap; thin books
   // are cut down proportionally so a single slippage event cannot blow past the
-  // stop. Market-derived, never a fixed 3x.
+  // stop. Market-derived; when volume is genuinely unknown we fall back to the
+  // POLICY CAP (itself a bound), never a fabricated midpoint.
   const capMax = bound(cfg.perpsHedgeLeverageMaxCap, 3);
-  const liquidity = volume > 0 ? clamp(volume / bound(cfg.minVolumeUsd, 10_000_000), 0.25, 1) : 0.5;
+  const liquidity = volume > 0 ? clamp(volume / bound(cfg.minVolumeUsd, 10_000_000), 0.25, 1) : 1;
   const perpsHedgeLev = clamp(capMax * liquidity, 1, capMax);
 
   return {

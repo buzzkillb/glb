@@ -113,10 +113,19 @@ export class StrategyEngine {
     return Math.max(-1, Math.min(1, m.priceChange24H / m.price));
   }
 
-  /** Live venue 24h volume (USD), from the perps mark feed; 0 = unknown. */
+  /**
+   * Last REAL venue 24h volume (USD) we observed. The venue feed intermittently
+   * omits volume; carrying the last real reading forward keeps the hedge-leverage
+   * ceiling stable and never fabricates a placeholder. 0 means "never observed",
+   * which the derivation treats as unknown (falls back to the policy cap).
+   */
+  private lastObservedVolumeUsd = 0;
+
+  /** Live venue 24h volume (USD), from the perps mark feed; 0 = never observed. */
   private marketVolumeUsd(): number {
     const m = this.perps?.markForEngine?.();
-    return m?.volumeUsd ?? 0;
+    if (m && m.volumeUsd > 0) this.lastObservedVolumeUsd = m.volumeUsd;
+    return this.lastObservedVolumeUsd;
   }
 
   constructor(
