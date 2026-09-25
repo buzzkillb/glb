@@ -1,5 +1,4 @@
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
-import type { AppConfig } from './config.js';
 import { dryRunEnabled, liveExecutionKilled } from './jupiter.js';
 import { PERP_MARKETS } from './perpPrice.js';
 import type { PerpPosition } from './perpStore.js';
@@ -396,6 +395,6 @@ export class PerpBroker {
   }
 }
 
-export function perpsApiUrl(cfg: AppConfig): string {
-  return process.env.PERPS_API_URL || 'https://perps-api.jup.ag/v1';
-}
+// Perps venue base URL lives on the perps config (PERPS_API_URL). The sleeve,
+// feed and broker all read cfg.strategies.perps.apiUrl directly, so there is no
+// separate helper to keep in sync.

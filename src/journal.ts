@@ -25,14 +25,7 @@
 //    trade tape and the on-chain balance.
 // ---------------------------------------------------------------------------
 
-import {
-  appendFileSync,
-  existsSync,
-  readFileSync,
-  mkdirSync,
-  writeFileSync,
-  renameSync,
-} from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Trade } from './types.js';
 
@@ -259,14 +252,4 @@ export function distributeUntracked(
   return out;
 }
 
-/** Atomic rewrite used by the audit snapshot exporter (tmp + rename). */
-export function writeJsonAtomic(file: string, payload: unknown): void {
-  try {
-    ensureDir();
-    const tmp = `${file}.tmp`;
-    writeFileSync(tmp, JSON.stringify(payload), { encoding: 'utf8', mode: 0o600 });
-    renameSync(tmp, file);
-  } catch (e) {
-    console.warn(`[journal] atomic write failed: ${(e as Error).message}`);
-  }
-}
+/** Atomic rewrite helper for JSON file work (tmp + rename). */

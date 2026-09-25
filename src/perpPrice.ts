@@ -71,10 +71,6 @@ export class PerpPriceFeed {
     return this.ok;
   }
 
-  lastRejectReason(): string {
-    return this.lastRejectReasonText;
-  }
-
   rejectReason(): string {
     return this.lastRejectReasonText;
   }

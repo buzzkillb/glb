@@ -127,16 +127,6 @@ export class PerpSleeve {
     return Math.max(0, planned);
   }
 
-  /**
-   * Hedge-target exposure including planned spot accumulation. This is the
-   * number the hedge should be sized against so grid/DCA buying INTO a decline
-   * is already covered — the difference between a hedge that protects the whole
-   * position and one that perpetually lags a dipping book.
-   */
-  private hedgeExposureUsd(mark: number): number {
-    return this.gridNetLongUsd(mark) + this.plannedSpotAccumUsd(mark);
-  }
-
   private equityUsd(): number {
     // Reuse the store's own chain-vs-books equity calc (spot book only), then
     // add back the sleeve's own open-position equity. Posting margin moves USDC

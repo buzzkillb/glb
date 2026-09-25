@@ -237,12 +237,6 @@ export class PerpStore {
     this.save();
   }
 
-  clearHalt(): void {
-    this.ledger.halted = false;
-    this.ledger.haltReason = '';
-    this.save();
-  }
-
   rollRealized(pnlUsd: number, feeUsd: number): void {
     // `realizedPnlUsd` is the sleeve's net trading result (used by the loss
     // ceiling); `feesPaidUsd` is the cost line. Keep them disjoint so carry is
