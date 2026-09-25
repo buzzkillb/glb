@@ -154,7 +154,6 @@ export class DcaStrategy {
     const price = this.priceOracle.current;
     const slice = Math.min(heldQty, (heldQty * da.takeProfitSlicePct) / 100);
     if (slice <= 0) return;
-
     const order: Order = {
       id: this.store.newOrderId(),
       kind: 'DCA_SELL',
@@ -174,8 +173,10 @@ export class DcaStrategy {
     // Reset the trailing state so the next run starts fresh after re-accumulation.
     delete this.store.strategies.dca.tpArmed;
     delete this.store.strategies.dca.peakPrice;
+    const tpPct = this.levers ? this.levers.dcaTakeProfitPct : da.takeProfitPct;
+    const trailPct = this.levers ? this.levers.dcaTrailingPct : da.trailingPct;
     console.log(
-      `[dca] take-profit: sold ${slice.toFixed(4)} SOL @ $${price.toFixed(2)} (trail $${this.cfg.strategies.dca.trailingPct}%)`
+      `[dca] take-profit: sold ${slice.toFixed(4)} SOL @ ${price.toFixed(2)} (target +${tpPct.toFixed(2)}%, trail ${trailPct.toFixed(2)}%)`
     );
   }
 

@@ -57,25 +57,24 @@ export interface DynamicLeversConfig {
 
 /**
  * Live signals the derivation reads. All values are measured, never assumed:
- *  - volPct/trendPct come from the on-chain OHLCV the price oracle already
- *    fetched for the grid band;
+ *  - volPct comes from the real on-chain 24h high/low amplitude (the range the
+ *    tape actually offered), the same DEX history the grid band uses;
  *  - feeFloorPct comes from the broker's real round-trip fee model;
- *  - momentum24HPct/volumeUsd come from the perps venue mark feed.
+ *  - momentum24HPct/volumeUsd come from the perps venue mark feed;
+ *  - freeCashUsd/realizedProfitUsd come from the account's settled balances.
  * A 0 in any required input means "unknown" and fails SAFE.
  */
 export interface RegimeSignals {
-  /** Realized volatility, in PERCENT (e.g. 3 means a 3% range). */
+  /** Tradable 24h amplitude, in PERCENT (e.g. 3 means a 3% range). */
   volPct: number;
-  trendPct: number;
   momentum24HPct: number;
   volumeUsd: number;
   /** Broker's round-trip fee floor, in PERCENT of price. */
   feeFloorPct: number;
   equityUsd: number;
+  /** Settled USDC actually on hand — you cannot deploy profit you do not hold. */
   freeCashUsd: number;
   realizedProfitUsd: number;
-  /** Spare SOL/USDC the spot engine could still deploy (working headroom). */
-  deployHeadroomUsd: number;
 }
 
 export interface DerivedLevers {
@@ -200,10 +199,12 @@ export function deriveLevers(
 
   // --- Perps profit share: a falling tape is exactly when a short hedge pays,
   // so deploy more of our banked profit then; a rising tape makes borrow a drag,
-  // so deploy less. Trend-scaled, clamped.
+  // so deploy less. Trend-scaled, then capped by what we actually hold as free
+  // cash — you cannot post profit you do not have settled. Clamped to policy.
   const downdraft = Math.max(0, -sig.momentum24HPct);
+  const freeCashRatio = equity > 0 ? clamp(sig.freeCashUsd / equity, 0, 1) : 0;
   const perpsShare = clamp(
-    bound(cfg.perpsShareBasePct, 0.6) * (1 + downdraft * bound(cfg.shareTrendMult, 1.5)),
+    bound(cfg.perpsShareBasePct, 0.6) * (1 + downdraft * bound(cfg.shareTrendMult, 1.5)) * freeCashRatio,
     bound(cfg.perpsProfitShareMinPct, 0.25),
     bound(cfg.perpsProfitShareMaxPct, 1)
   );

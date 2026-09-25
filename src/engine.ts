@@ -86,14 +86,12 @@ export class StrategyEngine {
       // actually offered is the honest input for TP sizing and perps risk. A 0
       // (unknown window) fails the derivation safe.
       volPct: this.priceOracle.rangeAmplitudePct(1440),
-      trendPct: this.priceOracle.recentTrend() * 100,
       momentum24HPct: this.marketMomentum24H(),
       volumeUsd: this.marketVolumeUsd(),
       feeFloorPct: feeFloorFraction(feeStepUsd, price),
       equityUsd,
       freeCashUsd: acc.balances?.USDC ?? 0,
       realizedProfitUsd: acc.realizedPnlUsd ?? 0,
-      deployHeadroomUsd: Math.max(0, this.cfg.risk.maxUsdcPosition - this.store.totalDeployedUsd()),
     };
     const derived = deriveLevers(dl, sig);
     this.levers = derived.usable ? derived : null;

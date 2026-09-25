@@ -8,14 +8,12 @@ import { deriveLevers, DEFAULT_DYNAMIC_LEVERS, feeFloorFraction } from '../src/r
 
 const base = {
   volPct: 3, // PERCENT — e.g. a 3% realized range
-  trendPct: 0,
   momentum24HPct: 0,
   volumeUsd: 50_000_000,
   feeFloorPct: 0.08, // PERCENT — broker round-trip fee floor
   equityUsd: 10_000,
-  freeCashUsd: 2_000,
+  freeCashUsd: 10_000, // fully liquid, so the profit-share cap doesn't bind
   realizedProfitUsd: 500,
-  deployHeadroomUsd: 1_000,
 };
 
 test('dynamic levers: fails safe when volatility is unknown (never guesses)', () => {
@@ -66,6 +64,23 @@ test('dynamic levers: perps profit share grows on a falling tape', () => {
   const flat = deriveLevers(DEFAULT_DYNAMIC_LEVERS, { ...base, momentum24HPct: 0 });
   const falling = deriveLevers(DEFAULT_DYNAMIC_LEVERS, { ...base, momentum24HPct: -0.2 });
   assert.ok(falling.perpsProfitSharePct > flat.perpsProfitSharePct);
+});
+
+test('dynamic levers: profit share capped by free cash actually on hand', () => {
+  // Same falling tape, but almost all equity is tied up in spot: you cannot
+  // post profit you do not hold as settled cash.
+  const liquid = deriveLevers(DEFAULT_DYNAMIC_LEVERS, {
+    ...base,
+    momentum24HPct: -0.2,
+    freeCashUsd: 10_000,
+  });
+  const illiquid = deriveLevers(DEFAULT_DYNAMIC_LEVERS, {
+    ...base,
+    momentum24HPct: -0.2,
+    freeCashUsd: 500,
+    equityUsd: 10_000,
+  });
+  assert.ok(illiquid.perpsProfitSharePct <= liquid.perpsProfitSharePct);
 });
 
 test('dynamic levers: hedge-leverage ceiling cuts down in a thin book', () => {
