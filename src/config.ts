@@ -623,6 +623,7 @@ export function loadConfig(): AppConfig {
       dcaTrailMinPct: envNumber('DYN_DCA_TRAIL_MIN_PCT', 1.5, 0.1, 100),
       dcaTrailMaxPct: envNumber('DYN_DCA_TRAIL_MAX_PCT', 25, 0.1, 200),
       dcaTrailBasePct: envNumber('DYN_DCA_TRAIL_BASE_PCT', 4, 0.1, 100),
+      dcaTrailMaxOfTp: envNumber('DYN_DCA_TRAIL_MAX_OF_TP', 0.6, 0.05, 1),
       feeMult: envNumber('DYN_FEE_MULT', 3, 1, 100),
       tpVolShare: envNumber('DYN_TP_VOL_SHARE', 0.8, 0.1, 10),
       gridCompoundMaxPct: envNumber('DYN_GRID_COMPOUND_MAX_PCT', 1, 0, 50),

@@ -25,6 +25,12 @@ export interface DynamicLeversConfig {
   dcaTrailMaxPct: number;
   /** Neutral trail give-back at the target volatility, in %. */
   dcaTrailBasePct: number;
+  /**
+   * Policy ceiling: the trail may never exceed this FRACTION of the take-profit.
+   * A trail wider than the target would let an armed exit give back more than
+   * the whole gain and fire below cost — the exact failure this prevents.
+   */
+  dcaTrailMaxOfTp: number;
   /** How many round-trip fees the TP must clear before it is allowed to fire. */
   feeMult: number;
   /** Fraction of the live volatility range we try to capture on a TP exit. */
@@ -97,6 +103,7 @@ export const DEFAULT_DYNAMIC_LEVERS: DynamicLeversConfig = {
   dcaTrailMinPct: 1.5,
   dcaTrailMaxPct: 25,
   dcaTrailBasePct: 4,
+  dcaTrailMaxOfTp: 0.6,
   feeMult: 3,
   tpVolShare: 0.8,
   gridCompoundMaxPct: 1,
@@ -169,13 +176,18 @@ export function deriveLevers(
 
   // --- DCA trail: calm tape -> tight give-back (lock the gain); choppy tape ->
   // wider give-back so ordinary noise does not eject us. Scales with the live
-  // volatility ratio, never a fixed 4%.
+  // volatility ratio, never a fixed 4%. CRITICAL: the give-back is HARD-capped
+  // to a FRACTION of the take-profit AFTER the policy floor/ceiling, so an
+  // armed trailing exit always books a positive gain. (The policy floor alone
+  // could exceed the cap on a tiny target — the cap wins.)
   const volRatio = volPct / volTarget;
-  const dcaTrail = clamp(
+  const trailGiveBackCap = dcaTp * bound(cfg.dcaTrailMaxOfTp, 0.6);
+  const trailCandidate = clamp(
     bound(cfg.dcaTrailBasePct, 4) * volRatio,
     bound(cfg.dcaTrailMinPct, 1.5),
     bound(cfg.dcaTrailMaxPct, 25)
   );
+  const dcaTrail = Math.max(0, Math.min(trailCandidate, trailGiveBackCap));
 
   // --- Grid compounding: reinvest realized profit, but only to the extent the
   // tape is calm enough that larger levels are likely to fill. Grows with the

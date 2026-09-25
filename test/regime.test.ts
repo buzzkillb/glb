@@ -66,6 +66,19 @@ test('dynamic levers: perps profit share grows on a falling tape', () => {
   assert.ok(falling.perpsProfitSharePct > flat.perpsProfitSharePct);
 });
 
+test('dynamic levers: trail never exceeds its fraction of the take-profit', () => {
+  // Even on a wild tape, the give-back must stay below the target so an armed
+  // trailing exit always books a positive gain (never sells below cost).
+  for (const volPct of [1, 5, 50, 200]) {
+    const d = deriveLevers(DEFAULT_DYNAMIC_LEVERS, { ...base, volPct });
+    assert.ok(
+      d.dcaTrailingPct <= d.dcaTakeProfitPct * DEFAULT_DYNAMIC_LEVERS.dcaTrailMaxOfTp + 1e-9,
+      `trail ${d.dcaTrailingPct} > ${DEFAULT_DYNAMIC_LEVERS.dcaTrailMaxOfTp} x TP ${d.dcaTakeProfitPct}`
+    );
+    assert.ok(d.dcaTrailingPct < d.dcaTakeProfitPct, 'gain must survive the trail');
+  }
+});
+
 test('dynamic levers: profit share capped by free cash actually on hand', () => {
   // Same falling tape, but almost all equity is tied up in spot: you cannot
   // post profit you do not hold as settled cash.
@@ -102,8 +115,8 @@ test('dynamic levers: every lever stays inside its configured policy bounds', ()
     assert.ok(d.usable);
     assert.ok(d.dcaTakeProfitPct >= DEFAULT_DYNAMIC_LEVERS.dcaTpMinPct);
     assert.ok(d.dcaTakeProfitPct <= DEFAULT_DYNAMIC_LEVERS.dcaTpMaxPct);
-    assert.ok(d.dcaTrailingPct >= DEFAULT_DYNAMIC_LEVERS.dcaTrailMinPct);
-    assert.ok(d.dcaTrailingPct <= DEFAULT_DYNAMIC_LEVERS.dcaTrailMaxPct);
+    assert.ok(d.dcaTrailingPct > 0);
+    assert.ok(d.dcaTrailingPct <= d.dcaTakeProfitPct * DEFAULT_DYNAMIC_LEVERS.dcaTrailMaxOfTp + 1e-9);
     assert.ok(d.gridCompoundPct >= 0);
     assert.ok(d.gridCompoundPct <= DEFAULT_DYNAMIC_LEVERS.gridCompoundMaxPct);
     assert.ok(d.perpsMaxEquityPct >= DEFAULT_DYNAMIC_LEVERS.perpsEquityMinPct);
