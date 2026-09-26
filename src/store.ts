@@ -14,6 +14,7 @@ import type {
   PerfBook,
 } from './types.js';
 import { notify } from './notify.js';
+import { cfgSolReserveSol } from './jupiter.js';
 import {
   appendJournal,
   appendEquityArchive,
@@ -594,6 +595,10 @@ export class StateStore extends EventEmitter {
       avgCostPerBase: pos?.avgCostPerBase ?? 0,
       trackedQty: basis?.trackedQty ?? null,
       untrackedQty: basis?.untrackedQty ?? null,
+      /** Native SOL permanently reserved for fees (never counted as sellable inventory). */
+      solFeeReserve: cfgSolReserveSol(),
+      /** SOL actually tradeable: chain minus the standing fee reserve. */
+      tradeableSol: Math.max(0, chainSol - cfgSolReserveSol()),
       booksSolQty: booksSum,
       booksMatchChain: Math.abs(booksSum - chainSol) < 1e-3,
       equityRingStartUsd: this.equityHistory[0]?.equityUsd ?? null,

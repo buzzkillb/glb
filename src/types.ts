@@ -450,6 +450,10 @@ export interface Snapshot {
     untrackedQty: number | null;
     booksSolQty: number;
     booksMatchChain: boolean;
+    /** Native SOL held back for fees; never counted as sellable inventory. */
+    solFeeReserve: number;
+    /** Chain SOL minus the fee reserve = SOL the strategies may actually sell. */
+    tradeableSol: number;
     equityRingStartUsd: number | null;
     equityRingSpanHours: number;
   };
