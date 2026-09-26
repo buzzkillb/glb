@@ -1355,7 +1355,7 @@
       setTxt('auChainSol', fmt(a.chainSol, 3) + ' SOL');
       setTxt('auReserve', fmt(a.solFeeReserve, 2) + ' SOL');
       setTxt('auTradeable', fmt(a.tradeableSol, 3) + ' SOL');
-      setTxt('auBasis', '
+      setTxt('auBasis', '$' + fmt(a.avgCostPerBase, 2));
       const note = document.getElementById('auNote');
       note.textContent = a.booksMatchChain
         ? 'Books reconcile to the chain. Untracked SOL is inventory no fill explains (deposit/manual transfer), valued at spot.'
@@ -1420,79 +1420,6 @@
   }
   loadFunding();
   setInterval(loadFunding, 120000);
-
-  connect();
-
-</script>
-</body>
-</html>
- + fmt(a.avgCostPerBase, 2));
-      const note = document.getElementById('auNote');
-      note.textContent = a.booksMatchChain
-        ? 'Books reconcile to the chain. Untracked SOL is inventory no fill explains (deposit/manual transfer), valued at spot.'
-        : '\u26a0 Books (' + fmt(a.booksSolQty, 3) + ' SOL) do not match chain (' + fmt(a.chainSol, 3) + ' SOL) - reconcile in progress.';
-    } catch (e) {
-      console.warn('[dash] audit load failed: ' + (e && e.message));
-    }
-  }
-
-  async function loadHistory() {
-    try {
-      const res = await fetch('/api/history');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const j = await res.json();
-      histRows = j.days || [];
-      renderHistory();
-    } catch (e) {
-      console.warn('[dash] history load failed: ' + (e && e.message));
-    }
-  }
-  document.querySelectorAll('#histRange .seg-btn').forEach((b) => {
-    b.addEventListener('click', () => {
-      document.querySelectorAll('#histRange .seg-btn').forEach((x) => x.classList.remove('active'));
-      b.classList.add('active');
-      histRange = b.dataset.hrange;
-      renderHistory();
-    });
-  });
-  loadHistory();
-  setInterval(loadHistory, 60000);
-  loadAudit();
-  setInterval(loadAudit, 60000);
-
-  // FUNDING/CARRY BADGE — Jup perps SOL borrow APR (the carry our short
-  // sleeve pays; the venue's analog of a funding rate). Display-only: degrades
-  // to "—" on failure, badge dims when the sample goes stale.
-  async function loadFunding() {
-    const el = document.getElementById('fundingBadge');
-    if (!el) return;
-    try {
-      const res = await fetch('/api/funding');
-      const j = await res.json();
-      if (!j || j.unavailable || j.longAprPct == null) {
-        el.textContent = 'carry —';
-        el.style.opacity = '.5';
-        return;
-      }
-      const stale = (j.ageSec || 0) > 900;
-      el.style.opacity = stale ? '.5' : '1';
-      const f = (v) => (v >= 100 ? v.toFixed(0) : v.toFixed(1));
-      el.innerHTML =
-        `<span style="color:var(--muted);font-size:10px;letter-spacing:.5px">LONG</span> ` +
-        `<span style="color:var(--${j.longAprPct >= 15 ? 'green' : 'text'})">${f(j.longAprPct)}%</span>` +
-        `<span style="color:var(--dim)"> · </span>` +
-        `<span style="color:var(--muted);font-size:10px;letter-spacing:.5px">SHORT</span> ` +
-        `<span style="color:var(--${j.shortAprPct >= 15 ? 'amber' : 'text'})">${f(j.shortAprPct)}%</span>` +
-        `<span style="color:var(--dim);font-size:10px"> APR</span>`;
-    } catch (e) {
-      el.textContent = 'carry —';
-      el.style.opacity = '.5';
-    }
-  }
-  loadFunding();
-  setInterval(loadFunding, 120000);
-
-  connect();
 
 </script>
 </body>
