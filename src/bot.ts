@@ -14,7 +14,7 @@ const PORT = Number(process.env.PORT || 3000);
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
-  console.log(`\ngrid-lord starting (mode: ${cfg.mode})`);
+  console.log(`\nGLB starting (mode: ${cfg.mode})`);
   console.log(`   RPC: ${cfg.rpcUrl}`);
 
   const keypair = loadKeypair(cfg);
