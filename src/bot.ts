@@ -109,7 +109,7 @@ async function main(): Promise<void> {
     5 * 60_000
   );
   funding.start();
-  dashboard.opts.fundingWatch = funding;
+  dashboard.fundingWatch = funding;
   dashboard.start(() => {
     console.log(`   Dashboard: http://localhost:${PORT}`);
   });

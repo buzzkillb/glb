@@ -33,8 +33,11 @@ export class DashboardServer {
   private app = express();
   private server: http.Server;
   private wss: WebSocketServer;
+  /** Sample source for /api/funding; assignable after construction. */
+  fundingWatch?: FundingWatch;
 
   constructor(private opts: DashboardServerOptions) {
+    this.fundingWatch = opts.fundingWatch;
     this.app.use(express.json());
 
     // REST: full snapshot
@@ -77,7 +80,7 @@ export class DashboardServer {
 
     // REST: live perps carry (Jup borrow APR per side) for the header gauge.
     this.app.get('/api/funding', (_req, res) => {
-      res.json(this.opts.fundingWatch?.current() ?? { unavailable: true });
+      res.json(this.fundingWatch?.current() ?? { unavailable: true });
     });
 
     // REST: pause/resume
@@ -92,6 +95,7 @@ export class DashboardServer {
       this.opts.store.pauseReason = '';
       res.json({ paused: false });
     });
+
 
     // Static UI
     const indexHtml = path.join(PUBLIC_DIR, 'index.html');
