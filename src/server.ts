@@ -11,6 +11,8 @@ import { HistoryStore } from './history.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
 
+import { FundingWatch } from './fundingWatch.js';
+
 export interface DashboardServerOptions {
   cfg: AppConfig;
   store: StateStore;
@@ -19,6 +21,8 @@ export interface DashboardServerOptions {
   port: number;
   /** Optional perps-ledger reader (open/close/halt/reject tape). */
   perpsLedger?: () => unknown;
+  /** Optional funding/carry watcher — `/api/funding` serves `current()`. */
+  fundingWatch?: FundingWatch;
 }
 
 /**
@@ -69,6 +73,11 @@ export class DashboardServer {
     this.app.get('/api/perps/ledger', (_req, res) => {
       const provider = this.opts.perpsLedger ?? this.opts.store.perpsLedgerProvider;
       res.json(provider ? provider() : { history: [] });
+    });
+
+    // REST: live perps carry (Jup borrow APR per side) for the header gauge.
+    this.app.get('/api/funding', (_req, res) => {
+      res.json(this.opts.fundingWatch?.current() ?? { unavailable: true });
     });
 
     // REST: pause/resume

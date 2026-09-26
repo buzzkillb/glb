@@ -201,6 +201,7 @@
     <span class="mode" id="modeBadge">paper</span>
   </div>
   <div class="right">
+    <div class="disp" id="fundingBadge" title="Jupiter Perps SOL borrow APR (the carry our short sleeve pays). Long = paid by longs, Short = paid by shorts. High short APR = expensive to stay short.">—</div>
     <div class="disp"><span class="dot" id="statusDot"></span><span id="statusText" style="font-size:12px;color:var(--muted)">—</span></div>
     <div class="clock" id="liveClock">—</div>
     <button id="pauseBtn">Pause</button>
@@ -1382,7 +1383,40 @@
   loadAudit();
   setInterval(loadAudit, 60000);
 
+  // FUNDING/CARRY BADGE — Jup perps SOL borrow APR (the carry our short
+  // sleeve pays; the venue's analog of a funding rate). Display-only: degrades
+  // to "—" on failure, badge dims when the sample goes stale.
+  async function loadFunding() {
+    const el = document.getElementById('fundingBadge');
+    if (!el) return;
+    try {
+      const res = await fetch('/api/funding');
+      const j = await res.json();
+      if (!j || j.unavailable || j.longAprPct == null) {
+        el.textContent = 'carry —';
+        el.style.opacity = '.5';
+        return;
+      }
+      const stale = (j.ageSec || 0) > 900;
+      el.style.opacity = stale ? '.5' : '1';
+      const f = (v) => (v >= 100 ? v.toFixed(0) : v.toFixed(1));
+      el.innerHTML =
+        `<span style="color:var(--muted);font-size:10px;letter-spacing:.5px">LONG</span> ` +
+        `<span style="color:var(--${j.longAprPct >= 15 ? 'green' : 'text'})">${f(j.longAprPct)}%</span>` +
+        `<span style="color:var(--dim)"> · </span>` +
+        `<span style="color:var(--muted);font-size:10px;letter-spacing:.5px">SHORT</span> ` +
+        `<span style="color:var(--${j.shortAprPct >= 15 ? 'amber' : 'text'})">${f(j.shortAprPct)}%</span>` +
+        `<span style="color:var(--dim);font-size:10px"> APR</span>`;
+    } catch (e) {
+      el.textContent = 'carry —';
+      el.style.opacity = '.5';
+    }
+  }
+  loadFunding();
+  setInterval(loadFunding, 120000);
+
   connect();
+
 </script>
 </body>
 </html>

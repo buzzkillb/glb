@@ -7,6 +7,8 @@ import { loadKeypair, pubkeyString } from './wallet.js';
 import { liveExecutionKilled, setDryRun, JupiterExec } from './jupiter.js';
 import { WalletSizer } from './sizer.js';
 import { HistoryStore } from './history.js';
+import { FundingWatch } from './fundingWatch.js';
+import { PERP_MARKETS } from './perpPrice.js';
 
 const PORT = Number(process.env.PORT || 3000);
 
@@ -97,6 +99,17 @@ async function main(): Promise<void> {
     } catch { /* measurement only — never crash the loop */ }
   });
   const dashboard = new DashboardServer({ cfg, store, history, port: PORT });
+  // FUNDING/CARRY WATCH: display-only gauge for Jup perps borrow APR. Starts
+  // with the perps sleeve's configured venue; when perps are disabled the
+  // /api/funding endpoint just reports unavailable. Poll cadence 5 min —
+  // venue rates move slowly and the header only needs the ballpark.
+  const funding = new FundingWatch(
+    cfg.strategies.perps?.apiUrl ?? 'https://perps-api.jup.ag/v1',
+    PERP_MARKETS.SOL,
+    5 * 60_000
+  );
+  funding.start();
+  dashboard.opts.fundingWatch = funding;
   dashboard.start(() => {
     console.log(`   Dashboard: http://localhost:${PORT}`);
   });
@@ -108,6 +121,7 @@ async function main(): Promise<void> {
   priceOracle.start();
 
   const shutdown = () => {
+    funding.stop();
     console.log('\nShutting down...');
     engine.stop();
     priceOracle.stop();
