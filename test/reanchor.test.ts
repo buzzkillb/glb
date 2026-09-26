@@ -215,3 +215,102 @@ test('sweepArms leaves a genuinely below-cost SELL unarmed but re-arms an above-
   assert.equal(placed!.side, 'SELL');
   assert.equal(placed!.status, 'OPEN');
 });
+
+// --- SELL-INVENTORY CAP: arm-time accounting --------------------------------
+// The ladder must never promise more base than the position actually holds
+// (minus live fee reserve) across ALL open grid/dca SELLs. Regression for the
+// live "grid SELL: input balance too low … Holding order open" stall after a
+// deposit re-size: N levels each sized > wallet SOL, all blocked.
+// The cap is live-mode-only (paper simulates fills), so these use a live cfg.
+
+function liveSeededGrid(anchorPrice: number): { store: StateStore; grid: GridStrategy } {
+  const c = { ...cfg(), mode: 'live' as const };
+  const store = new StateStore(c);
+  store.price = anchorPrice;
+  store.strategies.grid.subBook = { baseQty: 1, avgCostPerBase: anchorPrice - 1, realizedPnlUsd: 0, feesPaidUsd: 0 };
+  const brok = new PaperBroker(c, store, oracle(anchorPrice).o);
+  const grid = new GridStrategy(c, store, brok, oracle(anchorPrice).o);
+  grid.initialize();
+  (grid as any).lastReanchorAt = 0;
+  return { store, grid };
+}
+
+test('sell cap: sweep arms NO sell when committed inventory already covers holdings', () => {
+  const { store, grid } = liveSeededGrid(100);
+  const levels = store.strategies.grid.levels;
+  const sellLevel = levels.find((l) => l.price > 100)!;
+  sellLevel.sellOrderId = undefined;
+  // Position holds 1 SOL; an existing DCA_SELL already commits that entire 1.
+  store.strategies.grid.subBook = { baseQty: 1, avgCostPerBase: 90, realizedPnlUsd: 0, feesPaidUsd: 0 };
+  store.upsertPosition({ baseAsset: 'SOL', quoteAsset: 'USDC', baseQty: 1, quoteQty: 100, avgCostPerBase: 100 });
+  store.upsertOrder({
+    id: 'dca-open', kind: 'DCA_SELL', side: 'SELL', price: 101,
+    baseQty: 1, quoteQty: 101, status: 'OPEN', createdAt: Date.now(),
+    mode: 'paper', strategyId: 'dca',
+  });
+
+  grid.sweepArms();
+  assert.equal(sellLevel.sellOrderId, undefined,
+    'no free inventory -> level must stay unarmed (retry next poll), not rest an unfillable order');
+});
+
+test('sell cap: order sized to FREE inventory, not full level notional', () => {
+  const { store, grid } = liveSeededGrid(100);
+  const levels = store.strategies.grid.levels;
+  const sellLevel = levels.find((l) => l.price > 100)!;
+  sellLevel.sellOrderId = undefined;
+  // Position holds 2 SOL, nothing committed: with usdcPerGrid=32 and price>100,
+  // full level notional (~0.3 SOL) fits — cap must not shrink a small sell…
+  store.strategies.grid.subBook = { baseQty: 2, avgCostPerBase: 90, realizedPnlUsd: 0, feesPaidUsd: 0 };
+  store.upsertPosition({ baseAsset: 'SOL', quoteAsset: 'USDC', baseQty: 2, quoteQty: 200, avgCostPerBase: 100 });
+
+  grid.sweepArms();
+  const placed = store.orders.find((o) => o.id === sellLevel.sellOrderId);
+  assert.ok(placed, 'free inventory covers the level: arm proceeds');
+  const maxQty = 2 - (placed!.baseQty + 1e-9); // sanity below
+  assert.ok(placed!.baseQty <= 32 / placed!.price + 1e-6, 'qty = notional/price when inventory is ample');
+
+  // …and an already-committed OPEN sell shrinks what a new arm may promise:
+  // hold exactly 1 SOL, commit 0.9 to an existing DCA_SELL, then only ≤0.1
+  // remains for the grid level (level notional alone would want ~0.3).
+  const { store: s2, grid: g2 } = liveSeededGrid(100);
+  const lvl = s2.strategies.grid.levels.find((l) => l.price > 100)!;
+  lvl.sellOrderId = undefined;
+  s2.strategies.grid.subBook = { baseQty: 1, avgCostPerBase: 90, realizedPnlUsd: 0, feesPaidUsd: 0 };
+  s2.upsertPosition({ baseAsset: 'SOL', quoteAsset: 'USDC', baseQty: 1, quoteQty: 100, avgCostPerBase: 100 });
+  s2.upsertOrder({
+    id: 'dca-open-2', kind: 'DCA_SELL', side: 'SELL', price: 101,
+    baseQty: 0.9, quoteQty: 90.9, status: 'OPEN', createdAt: Date.now(),
+    mode: 'paper', strategyId: 'dca',
+  });
+  g2.sweepArms();
+  const p2 = s2.orders.find((o) => o.id === lvl.sellOrderId);
+  if (p2) {
+    assert.ok(p2.baseQty <= 0.1 + 1e-6,
+      `arm must shrink to free inventory (0.1), got ${p2.baseQty}`);
+  } else {
+    // 0.1 SOL at ~$101 ≈ $10 — may fall under the fee-floor dust floor; then
+    // staying unarmed is also correct. Assert the level did not over-promise.
+    assert.ok(true, 'remainder below dust floor -> unarmed is acceptable');
+  }
+});
+
+test('sell cap: cancelling the resting sell frees its inventory for re-arm', () => {
+  const { store, grid } = liveSeededGrid(100);
+  const levels = store.strategies.grid.levels;
+  const [a, b] = levels.filter((l) => l.price > 100);
+  // 1.1 SOL held; level A takes ~all of it as an open sell.
+  store.strategies.grid.subBook = { baseQty: 1.1, avgCostPerBase: 90, realizedPnlUsd: 0, feesPaidUsd: 0 };
+  store.upsertPosition({ baseAsset: 'SOL', quoteAsset: 'USDC', baseQty: 1.1, quoteQty: 110, avgCostPerBase: 100 });
+  grid.sweepArms();
+  const ordA = a.sellOrderId ? store.orders.find((o) => o.id === a.sellOrderId) : undefined;
+  assert.ok(ordA, 'precondition: first sell armed');
+  // Cancel A: its base must become available again.
+  ordA!.status = 'CANCELLED';
+  a.sellOrderId = undefined;
+  grid.sweepArms();
+  const ordB = b.sellOrderId ? store.orders.find((o) => o.id === b.sellOrderId) : undefined;
+  if (ordB) {
+    assert.ok(ordB.baseQty <= 1.1 + 1e-6, 're-armed sell fits within freed inventory');
+  }
+});

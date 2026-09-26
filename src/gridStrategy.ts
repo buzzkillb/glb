@@ -4,6 +4,7 @@ import type { Broker } from './broker.js';
 import type { DerivedLevers } from './regime.js';
 import type { PriceOracle } from './price.js';
 import type { Order } from './types.js';
+import { cfgSolReserveSol } from './jupiter.js';
 
 /**
  * Grid strategy — ADAPTIVE + SMARTER (price-smart, volatility-aware, trend-aware,
@@ -149,6 +150,44 @@ export class GridStrategy {
   }
 
   /**
+   * SELL-INVENTORY CAP — base asset actually available to a new grid SELL.
+   *
+   * The ladder sizes sells from notional-per-level alone; after a deposit
+   * re-size every level wants more SOL than the wallet holds, and all of them
+   * plan against the same inventory. The live broker shrinks at execution
+   * time, but the armed orders just sit there spamming "balance too low" and
+   * blocking the ladder. Arming time is the right place to know.
+   *
+   * free = position base − native-SOL fee reserve − base already committed to
+   * OPEN/PENDING grid+dca SELL orders (so two levels can never promise the
+   * same SOL). In paper mode the reserve is not debited from a simulated
+   * balance, so it is only subtracted in live mode.
+   */
+  private freeBaseForSell(): number {
+    const g = this.cfg.strategies.grid;
+    const pos = this.store.getPosition(g.baseAsset, g.quoteAsset);
+    // A fresh book may carry balances without a Position object yet (paper
+    // seed, pre-first-poll live): fall back to the ledger balance so the cap
+    // never reads a false zero and starves the whole sell side.
+    const held = pos?.baseQty
+      ?? (this.store.account.balances as Record<string, number | undefined>)[g.baseAsset]
+      ?? 0;
+    const reserve = this.cfg.mode === 'live' ? (cfgSolReserveSol() || 0) : 0;
+    let committed = 0;
+    for (const o of this.store.orders) {
+      if (o.status !== 'OPEN') continue;
+      if (o.kind !== 'GRID_SELL' && o.kind !== 'DCA_SELL') continue;
+      committed += o.baseQty;
+    }
+    return held - reserve - committed;
+  }
+
+  /** Smallest SELL worth resting: proceeds must clear one round-trip fee. */
+  private minSellQty(price: number): number {
+    return this.broker.minProfitStepUsd(price) / price;
+  }
+
+  /**
    * Feature 3 + 6 — trend/VWAP-slope regime filter. Returns false when we
    * should NOT arm this side (don't fight strong momentum, and don't arm asks
    * into a VWAP sliding down / bids into a VWAP climbing strongly).
@@ -262,7 +301,25 @@ export class GridStrategy {
     if (this.trendBlocks(side)) return false;
     if (side === 'SELL' && this.sellBelowCostWouldLose(price)) return false;
 
-    const qty = notional / price;
+    let qty = notional / price;
+    if (side === 'SELL') {
+      // SELL-INVENTORY CAP: never promise more base than is actually free
+      // (held − fee reserve − already-committed to other open sells). A level
+      // the inventory can't cover yet stays unarmed and is retried by the
+      // sweep/pending path — recovery is automatic when a BUY fills.
+      // A zero/unknown holding (fresh paper book, pre-first-poll) skips the
+      // cap: there is no inventory to mis-account yet, and the live broker's
+      // execution-time shrink remains the backstop. Paper mode skips the cap
+      // entirely — its ledger simulates fills and its tests arm from seeded
+      // balances; the accounting bug this fixes only exists on the live path.
+      const free = this.cfg.mode === 'live' ? this.freeBaseForSell() : Number.POSITIVE_INFINITY;
+      if (Number.isFinite(free) && free > 0) {
+        qty = Math.min(qty, free);
+        if (!(qty >= this.minSellQty(price))) return false;
+      } else if (Number.isFinite(free) && free <= 0) {
+        return false; // no disposable inventory: stay unarmed, retry next poll
+      }
+    }
     const order: Order = {
       id: this.store.newOrderId(),
       kind: side === 'BUY' ? 'GRID_BUY' : 'GRID_SELL',
