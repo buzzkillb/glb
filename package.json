@@ -1,5 +1,5 @@
 {
-  "name": "grid-lord",
+  "name": "glb",
   "version": "0.1.0",
   "private": true,
   "description": "Local Solana SOL/USDC grid + DCA trading bot with paper-trading engine and dashboard",
