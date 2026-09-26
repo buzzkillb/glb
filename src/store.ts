@@ -460,7 +460,10 @@ export class StateStore extends EventEmitter {
     if (last && now - last.ts < 5000) return; // dedupe within a poll window
     const stable = this.account.balances.USDC ?? 0;
     const nativeSolUsd = (this.account.balances.SOL ?? 0) * this.price;
-    const sample = { ts: now, equityUsd: stable + nativeSolUsd };
+    // PRICE IN THE SAMPLE: the History tab's "EOD price" column is derived from
+    // the last equity sample of the day, so the mark must ride along with the
+    // equity number or the column stays empty forever (the pre-fix bug).
+    const sample = { ts: now, equityUsd: stable + nativeSolUsd, priceUsd: this.price };
     this.equityHistory.push(sample);
     if (this.equityHistory.length > this.maxEquityPoints) {
       this.equityHistory = this.equityHistory.slice(-this.maxEquityPoints);

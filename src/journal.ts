@@ -47,6 +47,8 @@ export function equityArchivePath(mode: 'paper' | 'live'): string {
 export interface EquitySample {
   ts: number;
   equityUsd: number;
+  /** Mark price at sample time (optional: older archive rows lack it). */
+  priceUsd?: number;
 }
 
 function ensureDir(): void {

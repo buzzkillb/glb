@@ -72,3 +72,17 @@ test('rollupDay skips trades from other days', () => {
   assert.ok(Math.abs(rows.realizedUsd - 4) < 1e-9);
   assert.equal(rows.fills, 1);
 });
+
+test('EOD price: last-fill fallback marks the day when no price sample exists', () => {
+  // The History tab's price column regressed to permanent '-' because nothing
+  // ever wrote priceEod. Journal-rebuilt days must fall back to the LAST FILL
+  // price — a real execution, not a fabricated mark.
+  const early = Date.parse('2026-09-18T01:00:00Z');
+  const late = Date.parse('2026-09-18T23:00:00Z');
+    const rows = rollupDay('2026-09-18', [
+      t(early, 'grid', 'SELL', { price: 100, realizedPnlUsd: 1 }),
+      t(late, 'grid', 'BUY', { price: 119.5 }),
+    ]);
+    assert.equal(rows.priceEod, 119.5, 'EOD price = last fill of the day');
+    assert.equal(rows.source, 'journal');
+});

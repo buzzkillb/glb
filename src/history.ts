@@ -127,6 +127,23 @@ export function rollupDay(day: string, trades: Trade[]): DayRollup {
   row.winRate = sells ? wins / sells : 0;
   row.profitFactor = sumLosses < 0 ? sumWins / Math.abs(sumLosses) : (sumWins > 0 ? null : 0);
   row.noData = row.fills === 0;
+  // EOD PRICE FALLBACK: when no equity sample carries a mark (pre-price-sample
+  // archives, or days whose samples are lost), the LAST FILL of the day is a
+  // real execution — an honest end-of-day mark. Kept here (not in the rebuild
+  // loop) so live AND journal-rebuilt rows both benefit.
+  if (row.priceEod == null) {
+    let last = 0;
+    let lastPrice: number | null = null;
+    for (const t of trades) {
+      if (utcDay(t.ts) !== day) continue;
+      if (t.strategyId !== 'grid' && t.strategyId !== 'dca') continue;
+      if (t.ts >= last && t.price > 0) {
+        last = t.ts;
+        lastPrice = t.price;
+      }
+    }
+    row.priceEod = lastPrice;
+  }
   return row;
 }
 
@@ -194,6 +211,16 @@ export class HistoryStore {
       // Only fill when we don't already have a better (live) reading.
       if (row.equityBod == null) row.equityBod = bod;
       if (row.equityEod == null) row.equityEod = eod;
+      // EOD PRICE: last sample of the day that carries a mark. Samples recorded
+      // before the price field existed (or price=0 glitch) are skipped so the
+      // column shows '-' rather than a fabricated 0.
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const p = arr[i]!.priceUsd;
+        if (p != null && p > 0) {
+          if (row.priceEod == null) row.priceEod = p;
+          break;
+        }
+      }
     }
   }
 
