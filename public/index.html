@@ -52,6 +52,17 @@
   .logo img { width: 100%; height: 100%; object-fit: cover; display: block; animation: logoSpin 24s linear infinite; }
   @keyframes logoSpin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .logo img { animation: none; } }
+
+  /* Chart hover tooltip: crosshair dot + floating label on line charts. */
+  .chart-tip {
+    position: absolute; pointer-events: none; z-index: 30;
+    background: var(--panel2); border: 1px solid var(--border2);
+    color: var(--text); font-family: var(--mono); font-size: 11px;
+    padding: 4px 7px; border-radius: 6px; white-space: nowrap;
+    transform: translate(-50%, -130%); box-shadow: 0 2px 10px rgba(0,0,0,.5);
+    display: none;
+  }
+  svg.chart-hover { position: relative; touch-action: pan-y; }
   .brand h1 { font-size: 17px; letter-spacing: .3px; margin: 0; font-weight: 700; }
   .brand .tag { font-size: 11px; color: var(--dim); letter-spacing: 2px; text-transform: uppercase; }
   .mode { font-family: var(--mono); font-size: 11px; padding: 4px 11px; border-radius: 20px;
@@ -248,7 +259,7 @@
     <div class="row3">
       <div class="section">
         <h2>Equity Curve <span class="muted" id="ovEquityPeak">—</span></h2>
-        <svg id="equityChart" viewBox="0 0 820 220" preserveAspectRatio="none"
+        <svg id="equityChart" class="chart-hover" viewBox="0 0 820 220" preserveAspectRatio="none"
              style="width:100%;height:210px;display:block"></svg>
         <div class="statline">
           <span>Current <b id="ovEquityCur">—</b></span>
@@ -449,7 +460,7 @@
       </div>
       <div class="card" style="margin-top:12px">
         <div class="k">Open position net PnL over time <span class="muted">(the hedge's live trajectory)</span></div>
-        <svg id="pPnlSpark" viewBox="0 0 600 120" preserveAspectRatio="none" style="width:100%;height:120px;display:block;margin-top:6px"></svg>
+        <svg id="pPnlSpark" class="chart-hover" viewBox="0 0 600 120" preserveAspectRatio="none" style="width:100%;height:120px;display:block;margin-top:6px"></svg>
         <div class="muted" id="pPnlSparkMeta" style="font-size:12px">waiting for samples…</div>
       </div>
       <div class="card" style="margin-top:12px">
@@ -489,7 +500,7 @@
     </div>
     <div class="section">
       <h2>Equity <span class="muted">end of each UTC day</span></h2>
-      <svg id="histEquityChart" viewBox="0 0 820 200" preserveAspectRatio="none" style="width:100%;height:190px;display:block"></svg>
+      <svg id="histEquityChart" class="chart-hover" viewBox="0 0 820 200" preserveAspectRatio="none" style="width:100%;height:190px;display:block"></svg>
       <div class="muted" style="font-size:11px;margin-top:2px">End-of-day net worth (USDC + SOL at market). A jump with no matching PnL is a deposit/withdrawal.</div>
       <table style="margin-top:12px">
         <thead><tr><th>Day</th><th>Net PnL</th><th>Realized</th><th>Fees</th><th>Round-trips</th><th>Fills</th><th>Win rate</th><th>PF</th><th>Equity EOD</th><th>Price EOD</th></tr></thead>
@@ -721,6 +732,52 @@
     setStatus(s.risk.paused ? 'PAUSED' : 'running', s.risk.paused ? 'paused' : 'live');
   }
 
+  // ============ CHART HOVER ============
+  // Shared crosshair+tooltip for SVG line charts. Each render pass calls
+  // attachHover(svg, pts) with pts = [{x,y,label}] in USER units (viewBox);
+  // nearest-point lookup happens in user space so preserveAspectRatio=none
+  // scaling is handled by mapping the mouse through getScreenCTM().inverse().
+  const _hoverState = new WeakMap(); // svg -> {tip, dot, pts, onMove, onLeave}
+  function attachHover(svg, pts) {
+    let st = _hoverState.get(svg);
+    if (!st) {
+      const tip = document.createElement('div');
+      tip.className = 'chart-tip';
+      svg.parentNode.style.position = svg.parentNode.style.position || 'relative';
+      svg.parentNode.appendChild(tip);
+      const ns = 'http://www.w3.org/2000/svg';
+      const dot = document.createElementNS(ns, 'circle');
+      dot.setAttribute('r', '3.5'); dot.setAttribute('fill', 'var(--accent)');
+      dot.setAttribute('stroke', 'var(--bg)'); dot.setAttribute('stroke-width', '1.5');
+      dot.style.display = 'none'; dot.setAttribute('pointer-events', 'none');
+      svg.appendChild(dot);
+      const onMove = (ev) => {
+        const cur = _hoverState.get(svg);
+        if (!cur || !cur.pts.length) return;
+        const m = svg.getScreenCTM(); if (!m) return;
+        const inv = m.inverse();
+        const ux = ev.clientX * inv.a + ev.clientY * inv.c + inv.e;
+        let best = cur.pts[0], bd = Infinity;
+        for (const p of cur.pts) { const d = Math.abs(p.x - ux); if (d < bd) { bd = d; best = p; } }
+        dot.setAttribute('cx', best.x); dot.setAttribute('cy', best.y);
+        dot.style.display = '';
+        tip.textContent = best.label;
+        tip.style.display = 'block';
+        const lx = best.x / 820, ly = best.y / (svg.viewBox.baseVal.height || 220);
+        tip.style.left = (lx * svg.clientWidth) + 'px';
+        tip.style.top = (ly * svg.clientHeight) + 'px';
+      };
+      const onLeave = () => { dot.style.display = 'none'; tip.style.display = 'none'; };
+      svg.addEventListener('mousemove', onMove);
+      svg.addEventListener('mouseleave', onLeave);
+      st = { tip, dot, pts: [], onMove, onLeave };
+      _hoverState.set(svg, st);
+    }
+    // Re-renders overwrite svg.innerHTML and orphan our dot; re-graft it.
+    if (!st.dot.isConnected) svg.appendChild(st.dot);
+    st.pts = pts;
+  }
+
   function renderEquity(s) {
     const eq = s.equityHistory || [];
     const svg = $('equityChart');
@@ -754,6 +811,13 @@
       <polygon points="${area}" fill="url(#eqFill)"/>
       <polyline points="${line}" fill="none" stroke="${c}" stroke-width="2" vector-effect="non-scaling-stroke"/>
       <circle cx="${pts[pts.length-1][0]}" cy="${pts[pts.length-1][1]}" r="3.2" fill="${c}"/>`;
+    const t0 = eq[0].ts, t1 = eq[eq.length - 1].ts, span = Math.max(1, t1 - t0);
+    attachHover(svg, pts.map((p, i) => ({
+      x: p[0], y: p[1],
+      label: new Date(eq[i].ts).toLocaleTimeString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) +
+        ' · $' + Math.round(vals[i]).toLocaleString('en-US') +
+        ' · ' + ((vals[i] - vals[0]) >= 0 ? '+' : '−') + '$' + Math.abs(vals[i] - vals[0]).toFixed(0) + ' on span'
+    })));
   }
 
   function renderAlloc(s) {
@@ -1114,6 +1178,10 @@
     };
     mk(coords[0][0], coords[0][1] - 6, pts[0].equityEod, 'start');
     mk(coords[coords.length - 1][0], coords[coords.length - 1][1] - 6, pts[pts.length - 1].equityEod, 'end');
+    attachHover(svg, coords.map((c, i) => ({
+      x: c[0], y: c[1],
+      label: (pts[i].day || pts[i].key || '') + ' · EOD $' + Math.round(pts[i].equityEod).toLocaleString('en-US')
+    })));
   }
 
   // ============ PERPS SLEEVE ============
@@ -1255,6 +1323,10 @@
       '<line x1="0" y1="' + yAt(0).toFixed(1) + '" x2="' + W + '" y2="' + yAt(0).toFixed(1) +
       '" stroke="#5b6480" stroke-dasharray="4 4" stroke-width="1"/>' +
       '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="2"/>';
+    attachHover(svg, pts.map(function (x, i) {
+      const dt = new Date(x.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return { x: xAt(x.ts), y: yAt(x.netPnlUsd), label: dt + ' · net ' + (x.netPnlUsd >= 0 ? '+$' : '-$') + fmt(Math.abs(x.netPnlUsd), 2) };
+    }));
     meta.textContent =
       'net ' + (last >= 0 ? '+$' : '-$') + fmt(Math.abs(last), 2) +
       ' · ' + pts.length + ' samples over ' + Math.round(span / 60000) + ' min';
