@@ -10,3 +10,4 @@ DS_Store
 
 # Runtime state (crash recovery snapshots)
 .botstate/
+watchdog/*.log

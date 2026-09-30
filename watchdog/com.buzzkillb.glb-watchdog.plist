@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.buzzkillb.glb-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/buzzkillb/Desktop/Projects/trade/watchdog/watchdog.mjs</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/buzzkillb/Desktop/Projects/trade/watchdog/stdout.log</string>
+  <key>StandardErrorPath</key><string>/Users/buzzkillb/Desktop/Projects/trade/watchdog/stderr.log</string>
+</dict>
+</plist>

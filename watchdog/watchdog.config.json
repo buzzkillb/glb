@@ -1,0 +1,9 @@
+{
+  "WATCHDOG_STATE_URL": "http://127.0.0.1:3000/api/state",
+  "WATCHDOG_LABEL": "com.buzzkillb.glb",
+  "WATCHDOG_POLL_S": 20,
+  "WATCHDOG_FAILS": 3,
+  "WATCHDOG_PRICE_STALE_S": 180,
+  "WATCHDOG_MAX_RESTARTS_HR": 5,
+  "WATCHDOG_DRY_RUN": 1
+}
