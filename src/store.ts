@@ -458,16 +458,30 @@ export class StateStore extends EventEmitter {
    * summed all four terms — the dashboard Net Worth vs Equity gap was this bug.)
    * Ring-buffered so the persisted/streamed payload stays small.
    */
+  /**
+   * Meme-sleeve mark-to-market (CYB today): bag qty × last traded meme price,
+   summed over all slots. Part of true net worth — the wallet holds these
+   tokens just like SOL — so both sampleEquity() and audit() include it.
+   */
+  private memeMarkUsd(): number {
+    let usd = 0;
+    for (const m of Object.values(this.strategies.memes)) {
+      if (m.baseQty > 0 && m.price > 0) usd += m.baseQty * m.price;
+    }
+    return usd;
+  }
+
   sampleEquity(): void {
     const now = Date.now();
     const last = this.equityHistory[this.equityHistory.length - 1];
     if (last && now - last.ts < 5000) return; // dedupe within a poll window
     const stable = this.account.balances.USDC ?? 0;
     const nativeSolUsd = (this.account.balances.SOL ?? 0) * this.price;
+    const memeUsd = this.memeMarkUsd();
     // PRICE IN THE SAMPLE: the History tab's "EOD price" column is derived from
     // the last equity sample of the day, so the mark must ride along with the
     // equity number or the column stays empty forever (the pre-fix bug).
-    const sample = { ts: now, equityUsd: stable + nativeSolUsd, priceUsd: this.price };
+    const sample = { ts: now, equityUsd: stable + nativeSolUsd + memeUsd, priceUsd: this.price };
     this.equityHistory.push(sample);
     if (this.equityHistory.length > this.maxEquityPoints) {
       this.equityHistory = this.equityHistory.slice(-this.maxEquityPoints);
@@ -563,7 +577,7 @@ export class StateStore extends EventEmitter {
     const pos = this.getPosition('SOL', 'USDC');
     const chainSol = this.account.balances.SOL ?? 0;
     const chainUsdc = this.account.balances.USDC ?? 0;
-    const equity = chainUsdc + chainSol * (this.price || 0);
+    const equity = chainUsdc + chainSol * (this.price || 0) + this.memeMarkUsd();
     const journal = readJournal(this.cfg.mode);
     let buys = 0, sells = 0, buyUsd = 0, sellUsd = 0, realized = 0, fees = 0;
     let synthetic = 0;
