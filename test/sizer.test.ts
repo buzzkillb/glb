@@ -127,7 +127,8 @@ test('hysteresis: price wobble does NOT rescale; a real deposit DOES', async () 
     c.strategies.dca.usdcAmountPerBuy > dcaAfterStart,
     `dca rescaled up: ${dcaAfterStart} -> ${c.strategies.dca.usdcAmountPerBuy}`
   );
-  assert.equal(c.strategies.memes[0].maxUsdcPosition, Math.round((2100 + 2 * 113.4) * 0.1));
+  // cyb cap = min(10% of equity, CYB_MAX_USDC hard ceiling; unset in tests -> 200 default)
+  assert.equal(c.strategies.memes[0].maxUsdcPosition, Math.min(Math.round((2100 + 2 * 113.4) * 0.1), Number(process.env.CYB_MAX_USDC ?? 200)));
 });
 
 test('small-wallet floors: budgets never collapse below sane minimums', async () => {

@@ -534,6 +534,7 @@
   let perfWin = '24h';
   let lastPrice = null;
   let lastSnapshot = null;
+  let perpsLive = { collateralUsd: 0, unrealizedPnlUsd: 0 }; // refreshed ~10s from /api/perps
 
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -636,11 +637,16 @@
     } else priceEl.textContent = '—';
 
     const solVal = a.balances.SOL * s.price;
-    const netWorth = a.balances.USDC + solVal;
+    // TOTAL net worth: spot wallet + perps margin account (collateral incl. uPnL)
+    const perpsEq = perpsLive.collateralUsd + perpsLive.unrealizedPnlUsd;
+    const netWorth = a.balances.USDC + solVal + perpsEq;
     $('ovNetWorth').textContent = fmtUsd(netWorth);
     const allocDenom = netWorth > 0 ? netWorth : 1;
+    const perpsBits = perpsEq !== 0
+      ? ` + ${fmtUsd(perpsEq)} perps`
+      : '';
     $('ovNetWorthSub').textContent =
-      `${fmt(a.balances.SOL,4)} SOL (${(solVal/allocDenom*100).toFixed(1)}%) + ${fmtUsd(a.balances.USDC)} USDC`;
+      `${fmt(a.balances.SOL,4)} SOL (${(solVal/allocDenom*100).toFixed(1)}%) + ${fmtUsd(a.balances.USDC)} USDC${perpsBits}`;
 
     // ALL-IN REALIZED, NET OF FEES: spot books (grid/DCA/memes) + the perps
     // sleeve, fees subtracted. The old tile showed gross account.realizedPnlUsd
@@ -1492,6 +1498,20 @@
   }
   loadFunding();
   setInterval(loadFunding, 120000);
+
+  // Keep perps equity in the header net-worth fresh (10s poll).
+  async function pollPerpsEq() {
+    try {
+      const r = await fetch('/api/perps');
+      if (!r.ok) return;
+      const p = (await r.json()).perps || {};
+      const o = p.open || {};
+      perpsLive.collateralUsd = o.collateralUsd || 0;
+      perpsLive.unrealizedPnlUsd = o.unrealizedPnlUsd || 0;
+    } catch (e) { /* keep last known */ }
+  }
+  pollPerpsEq();
+  setInterval(pollPerpsEq, 10000);
 
   connect();
 </script>

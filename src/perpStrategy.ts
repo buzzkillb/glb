@@ -80,6 +80,12 @@ export interface PerpSleeveConfig {
   /** Exhaustion sensitivity vs the venue 24h range (default 1). */
   hedgeTakeProfitVolFactor?: number;
   /**
+   * Scaled take-profit: fraction of the position banked when the dynamic
+   * target first fires (tranche A); the remainder rides to the ceiling or an
+   * exhaustion signal. 0 or 1 = legacy single-shot close. Default 0 (off).
+   */
+  hedgeBankFraction?: number;
+  /**
    * Minutes to wait after a hedge take-profit/unwind before re-arming. Without
    * it, re-opening at the same mark could immediately re-trigger the take-profit
    * and churn venue fees for zero edge.
@@ -567,6 +573,75 @@ export interface HedgeProfitContext {
   maxTakeProfitPct?: number;
   /** Exhaustion sensitivity vs the 24h range. Default 1. */
   volFactor?: number;
+  /** Scaled TP: fraction banked at tranche A (0/1 = legacy single-shot). */
+  bankFraction?: number;
+  /** Tranches already banked on this position (0 none, 1 = A done). */
+  bankedTranches?: number;
+}
+
+/**
+ * SCALED HEDGE TAKE-PROFIT (tranche planner).
+ *
+ * Wraps planHedgeTakeProfit with a two-tranche bank: tranche A banks
+ * `bankFraction` of the position the first time the dynamic target fires;
+ the remainder (tranche B) then rides to the CEILING target (or an exhaustion
+ signal / exposure unwind / stop) before closing. With `bankFraction` 0 or 1
+ the behaviour collapses to the legacy all-or-nothing close.
+ *
+ * Pure so the tranche sequencing is directly testable: A must bank exactly
+ once, B must demand the higher target, and exhaustion closes everything.
+ */
+export function planHedgeTranche(
+  ctx: HedgeProfitContext & { bankedTranches?: number; bankFraction?: number }
+): {
+  action: 'hold' | 'bank' | 'partial';
+  /** Fraction of the CURRENT position to close (1 = whole thing). */
+  fraction: number;
+  finalTargetPct: number;
+  exhausted: boolean;
+  reason: string;
+} {
+  const bankFraction = Math.min(1, Math.max(0, ctx.bankFraction ?? 0));
+  const tranches = Math.min(2, Math.max(0, Math.floor(ctx.bankedTranches ?? 0)));
+  const floor = Math.max(0, ctx.minTakeProfitPct ?? 0);
+  const ceil = Math.max(floor, ctx.maxTakeProfitPct ?? floor);
+  const scaledArmed = bankFraction > 0 && bankFraction < 1;
+
+  // Tranche B (or legacy single-shot): after A has banked, demand the CEILING
+  // before letting the rest go — that is the entire point of having banked
+  // early. EXHAUSTION is the exception: once the move is spent, the remainder
+  // banks at the floor immediately rather than waiting for a target the dead
+  // trend may never reach.
+  const basePlan = planHedgeTakeProfit(ctx);
+  const wantCeiling = scaledArmed && tranches >= 1 && !basePlan.exhausted;
+  const plan = wantCeiling
+    ? planHedgeTakeProfit({ ...ctx, minTakeProfitPct: Math.max(floor, ceil) })
+    : basePlan;
+  if (!plan.fired) {
+    return {
+      action: 'hold',
+      fraction: 0,
+      finalTargetPct: plan.targetPct,
+      exhausted: plan.exhausted,
+      reason: plan.reason,
+    };
+  }
+  if (scaledArmed && tranches === 0) {
+    return {
+      action: 'partial',
+      fraction: bankFraction,
+      finalTargetPct: plan.targetPct,
+      exhausted: plan.exhausted,
+      reason: `tranche A: bank ${(bankFraction * 100).toFixed(0)}% at ${plan.reason}`,
+    };
+  }
+  return {
+    action: 'bank',
+    fraction: 1,
+    finalTargetPct: plan.targetPct,
+    exhausted: plan.exhausted,
+    reason: plan.reason,
+  };
 }
 
 /**

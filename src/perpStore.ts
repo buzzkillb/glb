@@ -41,6 +41,8 @@ export interface PerpPosition {
   positionPubkey?: string;
   /** 'hedge' | 'overlay' — why the sleeve is on. */
   intent: 'hedge' | 'overlay';
+  /** Scaled take-profit: 0 = none banked, 1 = tranche A banked (rest riding). */
+  bankedTranches?: number;
 }
 
 export interface PerpHistoryEntry {

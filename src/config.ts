@@ -371,6 +371,8 @@ export interface PerpSleeveConfig {
    * sooner. Optional so hand-built test configs stay valid.
    */
   hedgeTakeProfitVolFactor?: number;
+  /** Scaled TP: fraction banked at tranche A (0/1 = legacy single-shot close). */
+  hedgeBankFraction?: number;
   /**
    * Minutes to wait after a hedge take-profit/unwind before re-arming, so the
    * sleeve cannot churn venue fees re-entering at the same mark.
@@ -413,6 +415,8 @@ export interface AppConfig {
   pollIntervalMs: number;
   refreshIntervalMs: number; // dashboard price refresh
   walletKeyPath: string; // paper/live keypair file
+  /** Paper-mode simulated starting balances (env: PAPER_SEED_USDC / PAPER_SEED_SOL). */
+  paper: { seedUsdc: number; seedSol: number };
   strategies: StrategyConfig;
   risk: RiskConfig;
   /** BirdEye API key (needed for real on-chain OHLCV candles → VWAP for meme
@@ -465,6 +469,10 @@ export function loadConfig(): AppConfig {
     pollIntervalMs: envNumber('POLL_INTERVAL_MS', 30000),
     refreshIntervalMs: envNumber('REFRESH_INTERVAL_MS', 5000),
     walletKeyPath: process.env.WALLET_KEY_PATH || './wallet.key',
+    paper: {
+      seedUsdc: envNumber('PAPER_SEED_USDC', 1000, 0, 1e9),
+      seedSol: envNumber('PAPER_SEED_SOL', 5, 0, 1e6),
+    },
     birdeyeApiKey: process.env.BIRDEYE_API_KEY || undefined,
     strategies: {
       grid: {
@@ -579,6 +587,10 @@ export function loadConfig(): AppConfig {
         hedgeTakeProfitPct: envNumber('PERPS_HEDGE_TAKE_PROFIT_PCT', 0.25, 0, 100),
         hedgeTakeProfitMaxPct: envNumber('PERPS_HEDGE_TAKE_PROFIT_MAX_PCT', 0.6, 0, 100),
         hedgeTakeProfitVolFactor: envNumber('PERPS_HEDGE_TAKE_PROFIT_VOL_FACTOR', 1, 0.05, 100),
+        // Scaled take-profit: fraction of the position banked at tranche A
+        // (the dynamic floor target); the remainder rides to the ceiling or an
+        // exhaustion signal. 0 or 1 = legacy all-at-once close (default off).
+        hedgeBankFraction: envNumber('PERPS_HEDGE_BANK_FRACTION', 0, 0, 1),
         hedgeRearmCooldownMinutes: envNumber('PERPS_HEDGE_REARM_COOLDOWN_MINUTES', 30, 0, 10080),
         hedgeRearmMinNewExposureUsd: envNumber('PERPS_HEDGE_REARM_MIN_NEW_EXPOSURE_USD', 25, 0, 1e9),
         maxLossUsd: envNumber('PERPS_MAX_LOSS_USD', 0, 0, 1e9),

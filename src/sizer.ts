@@ -144,7 +144,7 @@ export class WalletSizer {
     d.vaTargetSol = s.solUsd > 0
       ? Math.max(0.5, (s.derived.dcaBudgetUsd) / s.solUsd / 2)
       : d.vaTargetSol;
-    m.maxUsdcPosition = Math.max(5, Math.round(s.derived.cybCapUsd));
+    m.maxUsdcPosition = Math.max(5, Math.min(Math.round(s.derived.cybCapUsd), envNum("CYB_MAX_USDC", 200)));
     this.cfg.risk.maxUsdcPosition = Math.max(
       5,
       Math.round(s.derived.hardStopRefUsd)

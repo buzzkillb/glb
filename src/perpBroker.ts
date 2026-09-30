@@ -248,12 +248,15 @@ export class PerpBroker {
     positionPubkey: string;
     walletAddress: string;
     signer?: Keypair;
+    /** Fraction of the position to close (0..1]; 1/undefined = full close. */
+    fractionOfPosition?: number;
   }): Promise<PerpCloseResult> {
     const mint = PERP_MARKETS[params.asset];
     if (!mint) return { ok: false, error: `unknown perp asset ${params.asset}` };
     if (!params.positionPubkey) {
       return { ok: false, error: 'missing positionPubkey: cannot build a decrease' };
     }
+    const frac = Math.min(1, Math.max(0.01, params.fractionOfPosition ?? 1));
 
     // NOTE: `/positions/decrease` uses a DIFFERENT schema from `increase`.
     // It requires `collateralUsdDelta`, `sizeUsdDelta`, `desiredMint`, and
@@ -261,13 +264,13 @@ export class PerpBroker {
     // payload is rejected with `invalid_argument`. A full close withdraws the
     // whole collateral and reduces the whole notional size to zero.
     const raw = await this.post('/positions/decrease', {
-      collateralUsdDelta: usdToRaw(params.collateralUsd),
-      sizeUsdDelta: usdToRaw(params.notionalUsd),
+      collateralUsdDelta: usdToRaw(params.collateralUsd * frac),
+      sizeUsdDelta: usdToRaw(params.notionalUsd * frac),
       desiredMint: USDC_MINT,
       positionPubkey: params.positionPubkey,
-      // A hedge unwind should exit the WHOLE position, not leave a stub behind.
-      // The venue honors `entirePosition` alongside the deltas.
-      entirePosition: true,
+      // A full close exits the WHOLE position; a partial tranche close leaves
+      // the remainder running. The venue honors `entirePosition` with deltas.
+      entirePosition: frac >= 1,
       maxSlippageBps: String(Math.max(1, Math.round(this.opts.slippageBps))),
     });
 

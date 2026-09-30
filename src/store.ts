@@ -221,10 +221,13 @@ export class StateStore extends EventEmitter {
   }
 
   private initialBalances(): { SOL: number; USDC: number } {
-    // In paper mode we simulate a balance. We allocate a fixed notional of USDC.
-    // Paper default: 1000 USDC + 5 SOL so grid/dca has room.
+    // In paper mode we simulate a balance. Env-configurable so a paper user
+    // chooses their own starting capital; defaults keep grid/dca room.
     if (this.cfg.mode === 'paper') {
-      return { SOL: 5, USDC: 1000 };
+      // Hand-built test/legacy configs may omit `paper` — fall back to the
+      // same defaults loadConfig would produce.
+      const p = this.cfg.paper ?? { seedUsdc: 1000, seedSol: 5 };
+      return { SOL: p.seedSol, USDC: p.seedUsdc };
     }
     // Live mode: balances are polled from chain + Jito; start at zero and overlay.
     return { SOL: 0, USDC: 0 };

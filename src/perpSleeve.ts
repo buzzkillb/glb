@@ -9,6 +9,7 @@ import {
   decideSleeveAction,
   hedgeTakeProfitHit,
   planHedgeTakeProfit,
+  planHedgeTranche,
   perpUnrealizedPnlUsd,
   rearmCooldownElapsed,
   rearmJustifiedByNewExposure,
@@ -454,7 +455,7 @@ export class PerpSleeve {
     // hands the gain back. Without this the hedge could only ever wait for the
     // stop or an exposure unwind, protecting but never realising a profit.
     if (pos.intent === 'hedge') {
-      const plan = planHedgeTakeProfit({
+      const tranche = planHedgeTranche({
         netPnlUsd: netPnl,
         collateralUsd: pos.collateralUsd,
         entryPriceUsd: pos.entryPriceUsd,
@@ -465,18 +466,60 @@ export class PerpSleeve {
         minTakeProfitPct: p.hedgeTakeProfitPct,
         maxTakeProfitPct: p.hedgeTakeProfitMaxPct,
         volFactor: p.hedgeTakeProfitVolFactor,
+        bankFraction: p.hedgeBankFraction,
+        bankedTranches: pos.bankedTranches ?? 0,
       });
-      if (plan.fired) {
-        const fee = pos.collateralUsd * p.openFeePct * pos.leverage;
+      if (tranche.action !== 'hold') {
+        // Scaled close: tranche A banks a fraction and the position STAYS OPEN
+        // with the remainder riding; tranche B / legacy mode closes it all.
+        // A partial bank must NOT roll the full PnL into realized — only the
+        // closed fraction's share — and must not clear the position either.
+        const fee = pos.collateralUsd * p.openFeePct * pos.leverage * tranche.fraction;
+        if (tranche.action === 'partial') {
+          const fracPnl = netPnl * tranche.fraction;
+          if (this.cfg.mode === 'live') {
+            const res = await this.broker.close({
+              asset: this.cfg.strategies.grid.baseAsset,
+              side: pos.side,
+              collateralUsd: pos.collateralUsd * tranche.fraction,
+              notionalUsd: notional * tranche.fraction,
+              positionPubkey: pos.positionPubkey ?? '',
+              walletAddress: this.walletAddr(),
+              signer: this.signer,
+              fractionOfPosition: tranche.fraction,
+            });
+            if (!res.ok) {
+              this.lastDecision = `tranche close failed: ${res.error ?? 'unknown'}`;
+              return;
+            }
+          }
+          // Scale the position's remaining size by what is left.
+          pos.collateralUsd *= 1 - tranche.fraction;
+          pos.bankedTranches = 1;
+          this.ledger.setPosition(pos);
+          this.ledger.rollRealized(fracPnl, fee);
+          this.ledger.record({
+            ts: Date.now(),
+            kind: 'close',
+            side: pos.side,
+            collateralUsd: pos.collateralUsd,
+            notionalUsd: notional * tranche.fraction,
+            pnlUsd: fracPnl,
+            price: mark,
+            note: `hedge tranche A banked: ${tranche.reason} (carry ${borrowUsd.toFixed(3)})`,
+          });
+          this.lastDecision = `banked tranche A (${(tranche.fraction * 100).toFixed(0)}%, ${fracPnl.toFixed(2)} USD) — remainder rides to ceiling`;
+          return;
+        }
         const ok = await this.settleClose(
           pos,
           notional,
           mark,
           netPnl,
           fee,
-          `hedge take-profit: ${plan.reason} (carry ${borrowUsd.toFixed(3)})`
+          `hedge take-profit: ${tranche.reason} (carry ${borrowUsd.toFixed(3)})`
         );
-        if (ok) this.lastDecision = `closed hedge take-profit (${netPnl.toFixed(2)} USD; ${plan.exhausted ? 'exhausted' : 'trend-ride'} target ${(plan.targetPct * 100).toFixed(0)}%)`;
+        if (ok) this.lastDecision = `closed hedge take-profit (${netPnl.toFixed(2)} USD; ${tranche.exhausted ? 'exhausted' : 'trend-ride'} target ${(tranche.finalTargetPct * 100).toFixed(0)}%)`;
         return;
       }
     }
