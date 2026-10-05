@@ -6,7 +6,7 @@ import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { AppConfig } from './config.js';
 import type { StateStore } from './store.js';
-import { HistoryStore } from './history.js';
+import { HistoryStore, computeGains } from './history.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
@@ -45,9 +45,23 @@ export class DashboardServer {
       res.json(this.opts.store.snapshot(this.opts.cfg));
     });
 
-    // REST: daily history rollups for the History tab (SOL book, all tiers).
+    // REST: daily history rollups for the History tab (SOL book, all tiers)
+    // plus trailing daily/weekly/monthly net-PnL gains vs the current total
+    // bag (USDC + SOL·price + memes — same equity the audit tab shows).
     this.app.get('/api/history', (_req, res) => {
-      res.json({ days: this.opts.history.rows() });
+      const days = this.opts.history.rows();
+      let bagUsd: number | null = null;
+      try {
+        // The bag is only trustworthy once the live wallet has actually synced
+        // (warmup chain balances are placeholder zeros — near-empty wallet look).
+        // Paper mode's simulated balances are valid from boot.
+        const walletReady =
+          this.opts.cfg.mode === 'paper' || this.opts.store.walletSyncedAt > 0;
+        if (walletReady) bagUsd = this.opts.store.audit().equityUsd ?? null;
+      } catch {
+        bagUsd = null; // measurement must never break the endpoint
+      }
+      res.json({ days, gains: computeGains(days, bagUsd) });
     });
 
     // REST: accounting audit — journal vs chain vs books (measurement-only).

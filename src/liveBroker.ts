@@ -107,6 +107,10 @@ export class LiveBroker implements Broker {
     try {
       a.balances.SOL = await this.jup.nativeSolBalance(this.signer.publicKey);
       a.balances.USDC = await this.jup.tokenBalance(this.signer.publicKey, USDC_MINT);
+      // Mark the wallet as synced so equity consumers know chain balances are
+      // real (see StateStore.walletSyncedAt — warmup zeros must not be
+      // mistaken for a near-empty wallet).
+      this.store.walletSyncedAt = Date.now();
       if (process.env.DEBUG_BALANCES === '1') {
         console.log(
           `[live] balances: ${a.balances.SOL.toFixed(4)} native SOL ` +

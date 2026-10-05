@@ -318,3 +318,68 @@ export class HistoryStore {
     return Object.values(this.days).sort((a, b) => a.day.localeCompare(b.day));
   }
 }
+
+// ---------------------------------------------------------------------------
+// TRAILING GAINS vs THE TOTAL BAG
+//
+// Pure measurement helper: expresses net PnL (realized − fees) over trailing
+// windows as a percentage of the current total bag (USDC + SOL·price + memes,
+// i.e. the same equity the audit tab shows). Measurement only — nothing here
+// feeds trading decisions.
+// ---------------------------------------------------------------------------
+
+/** Net PnL over a trailing window, expressed as % of the current total bag. */
+export interface TrailingGain {
+  /** Window start day (YYYY-MM-DD, inclusive). */
+  from: string;
+  /** Window end day (YYYY-MM-DD, inclusive — today for all windows). */
+  to: string;
+  /** Days inside the window that have a rollup row (noData rows count as $0). */
+  days: number;
+  /** Σ(realized − fees) across the window. */
+  netUsd: number;
+  /** netUsd ÷ bagUsd × 100; null when the bag is unknown or ≤ 0. */
+  pct: number | null;
+}
+
+export interface GainSummary {
+  /** Current total bag (USD) used as the denominator. */
+  bagUsd: number | null;
+  /** Today (UTC, in progress). */
+  daily: TrailingGain;
+  /** Trailing 7 UTC days including today. */
+  weekly: TrailingGain;
+  /** Trailing 30 UTC days including today. */
+  monthly: TrailingGain;
+}
+
+function windowGain(rows: DayRollup[], from: string, to: string): TrailingGain {
+  let netUsd = 0;
+  let days = 0;
+  for (const r of rows) {
+    if (r.day >= from && r.day <= to) {
+      netUsd += r.netUsd || 0;
+      days++;
+    }
+  }
+  return { from, to, days, netUsd, pct: null };
+}
+
+/**
+ * Compute daily/weekly/monthly net-PnL gains against the current total bag.
+ * Windows are trailing UTC calendar days ending today (daily = today only,
+ * weekly = today + 6, monthly = today + 29). Rows outside the journal's
+ * covered range simply contribute nothing (honest $0, never invented).
+ */
+export function computeGains(rows: DayRollup[], bagUsd: number | null, now = Date.now()): GainSummary {
+  const MS_DAY = 86_400_000;
+  const todayTs = Date.parse(utcDay(now) + 'T00:00:00Z');
+  const daily = windowGain(rows, utcDay(todayTs), utcDay(todayTs));
+  const weekly = windowGain(rows, utcDay(todayTs - 6 * MS_DAY), utcDay(todayTs));
+  const monthly = windowGain(rows, utcDay(todayTs - 29 * MS_DAY), utcDay(todayTs));
+  const bag = bagUsd != null && Number.isFinite(bagUsd) && bagUsd > 0 ? bagUsd : null;
+  for (const g of [daily, weekly, monthly]) {
+    g.pct = bag != null ? (g.netUsd / bag) * 100 : null;
+  }
+  return { bagUsd: bag, daily, weekly, monthly };
+}

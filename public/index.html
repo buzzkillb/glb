@@ -484,6 +484,12 @@
         <button class="seg-btn" data-hrange="month">Month</button>
         <button class="seg-btn" data-hrange="year">Year</button>
       </div>
+      <div class="statline" id="histGains" style="margin-bottom:8px">
+        <span>Today <b id="hgDay">-</b></span>
+        <span>7-day <b id="hgWeek">-</b></span>
+        <span>30-day <b id="hgMonth">-</b></span>
+        <span>Bag <b id="hgBag">-</b></span>
+      </div>
       <div class="statline" id="histStats">
         <span>Realized <b id="hsRealized">-</b></span>
         <span>Fees <b id="hsFees">-</b></span>
@@ -503,10 +509,10 @@
       <svg id="histEquityChart" class="chart-hover" viewBox="0 0 820 200" preserveAspectRatio="none" style="width:100%;height:190px;display:block"></svg>
       <div class="muted" style="font-size:11px;margin-top:2px">End-of-day net worth (USDC + SOL at market). A jump with no matching PnL is a deposit/withdrawal.</div>
       <table style="margin-top:12px">
-        <thead><tr><th>Day</th><th>Net PnL</th><th>Realized</th><th>Fees</th><th>Round-trips</th><th>Fills</th><th>Win rate</th><th>PF</th><th>Equity EOD</th><th>Price EOD</th></tr></thead>
+        <thead><tr><th>Day</th><th>Net PnL</th><th>Bag %</th><th>Realized</th><th>Fees</th><th>Round-trips</th><th>Fills</th><th>Win rate</th><th>PF</th><th>Equity EOD</th><th>Price EOD</th></tr></thead>
         <tbody id="histTable"></tbody>
       </table>
-      <div class="muted" style="font-size:11px;margin-top:6px">One row per UTC day, rebuilt from the forever trade journal (grey days had no fills). Equity endpoints come from the forever equity archive.</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">One row per UTC day, rebuilt from the forever trade journal (grey days had no fills). "Bag %" = the day's net PnL ÷ that day's end-of-day bag; the Today/7d/30-day strip above = net PnL ÷ current bag.</div>
     </div>
     <div class="section">
       <h2>Accounting Audit <span class="muted">(journal vs on-chain wallet vs strategy books)</span></h2>
@@ -1086,6 +1092,29 @@
   // ==================== HISTORY TAB ====================
   let histRows = [];
   let histRange = 'day';
+  let histGains = null; // trailing daily/weekly/monthly gains vs the total bag (from /api/history)
+
+  /** Formats a TrailingGain as `+0.12% · +$18.50` (or `-` when unknown). */
+  function gainText(g) {
+    if (!g || g.pct == null) return '-';
+    const pct = (g.pct >= 0 ? '+' : '-') + fmt(Math.abs(g.pct), 2) + '%';
+    const usd = (g.netUsd >= 0 ? '+' : '-') + '$' + fmt(Math.abs(g.netUsd), 2);
+    return pct + ' · ' + usd;
+  }
+
+  function renderGains() {
+    const set = (id, txt, cls) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = txt;
+      el.className = cls || '';
+    };
+    const g = histGains;
+    set('hgDay', gainText(g && g.daily), g && g.daily && g.daily.pct != null ? (g.daily.pct >= 0 ? 'pos' : 'neg') : '');
+    set('hgWeek', gainText(g && g.weekly), g && g.weekly && g.weekly.pct != null ? (g.weekly.pct >= 0 ? 'pos' : 'neg') : '');
+    set('hgMonth', gainText(g && g.monthly), g && g.monthly && g.monthly.pct != null ? (g.monthly.pct >= 0 ? 'pos' : 'neg') : '');
+    set('hgBag', g && g.bagUsd != null ? '$' + fmt(g.bagUsd, 0) : '-');
+  }
 
   function bucketKey(day, range) {
     if (range === 'day') return day;
@@ -1358,9 +1387,10 @@
   }
 
   function renderHistory() {
+    renderGains();
     if (!histRows.length) {
       document.getElementById('histTable').innerHTML =
-        '<tr><td colspan="10" class="muted">No history yet - one row is written per UTC day.</td></tr>';
+        '<tr><td colspan="11" class="muted">No history yet - one row is written per UTC day.</td></tr>';
       return;
     }
     const buckets = aggregate(histRows, histRange);
@@ -1394,13 +1424,21 @@
       const reaCls = (r.realizedUsd || 0) >= 0 ? 'pos' : 'neg';
       const eq = r.equityEod != null ? '$' + fmt(r.equityEod) : '-';
       const pe = r.priceEod != null ? '$' + fmt(r.priceEod) : '-';
+      // "Bag %": the day's net PnL as % of that day's own bag (EOD, falling
+      // back to BOD) — how much the day moved the needle at its portfolio size.
+      const dayBag = r.equityEod != null ? r.equityEod : (r.equityBod != null ? r.equityBod : null);
+      const bagPct = (dayBag != null && dayBag > 0 && r.netUsd != null)
+        ? '<td class="' + (r.netUsd >= 0 ? 'pos' : 'neg') + '">' + (r.netUsd >= 0 ? '+' : '-')
+          + fmt(Math.abs((r.netUsd / dayBag) * 100), 2) + '%</td>'
+        : '<td>-</td>';
       if (r.noData) {
         return '<tr class="muted"><td>' + r.day + '</td>'
-          + '<td>-</td><td>-</td><td>-</td><td>-</td><td>0</td>'
+          + '<td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>0</td>'
           + '<td>-</td><td>-</td><td>' + eq + '</td><td>' + pe + '</td></tr>';
       }
       return '<tr><td>' + r.day + '</td>'
         + '<td class="' + netCls + '">' + sign(r.netUsd || 0) + '$' + fmt(Math.abs(r.netUsd || 0)) + '</td>'
+        + bagPct
         + '<td class="' + reaCls + '">' + sign(r.realizedUsd || 0) + '$' + fmt(Math.abs(r.realizedUsd || 0)) + '</td>'
         + '<td>$' + fmt(r.feesUsd || 0) + '</td>'
         + '<td>' + (r.roundTrips || 0) + '</td>'
@@ -1449,6 +1487,7 @@
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const j = await res.json();
       histRows = j.days || [];
+      histGains = j.gains || null;
       renderHistory();
     } catch (e) {
       console.warn('[dash] history load failed: ' + (e && e.message));

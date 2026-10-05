@@ -135,6 +135,11 @@ export class StateStore extends EventEmitter {
   /** Rolling equity-curve history (ts + equity USD) for the dashboard chart.
    *  Appended at most once per poll; ring-buffered to keep the payload small. */
   equityHistory: { ts: number; equityUsd: number }[] = [];
+  /** Timestamp of the last successful live wallet sync (0 = never synced).
+   *  Until the first sync after boot, chain balances are placeholder zeros, so
+   *  any equity derived from them (audit, gain %) is warmup garbage. Paper
+   *  mode never syncs — its simulated balances are authoritative from boot. */
+  walletSyncedAt = 0;
   /** 7 days of equity samples at the default 30s poll ≈ 20k points. */
   private maxEquityPoints = 20_160;
   private maxOrders = 2000;
