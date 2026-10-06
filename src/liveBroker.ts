@@ -5,6 +5,7 @@ import type { Broker } from './broker.js';
 import type { Order, Position } from './types.js';
 import { JupiterExec, assertLiveAllowed, dryRunEnabled, cfgSolReserveSol } from './jupiter.js';
 import { buildPumpSwap } from './pumpSwap.js';
+import { notify } from './notify.js';
 import { Keypair } from '@solana/web3.js';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -397,6 +398,16 @@ export class LiveBroker implements Broker {
           mode: 'live',
         });
         console.log(`   [live] filled ${order.id} tx ${res.txid}`);
+        if (order.strategyId !== 'grid' && order.strategyId !== 'dca') {
+          // Meme slots (e.g. CYB) move tiny slices on a volatile token — the
+          // owner wants every one announced (Telegram + events.log). Grid/DCA
+          // fills stay routine and do NOT alert (they'd be constant spam).
+          notify(
+            'info',
+            `[${order.strategyId}] live ${side} ${baseQtySold.toPrecision(4)} @ ` +
+              `${fillPrice.toPrecision(6)} ($${quoteReceived.toFixed(2)}, tx ${res.txid.slice(0, 8)}…)`
+          );
+        }
       } else {
         // Submit failed — keep the order OPEN so it can retry next poll.
         this.inFlight.delete(order.id);

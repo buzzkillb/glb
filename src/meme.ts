@@ -2,6 +2,7 @@ import type { AppConfig, MemeSlotConfig } from './config.js';
 import type { StateStore } from './store.js';
 import type { Candle, Order, Trade, MemeState } from './types.js';
 import type { Broker } from './broker.js';
+import { notify } from './notify.js';
 
 /**
  * SELF-CONTAINED meme strategy for graduated pump.fun tokens (e.g. CYB).
@@ -542,6 +543,14 @@ export class MemeStrategy {
     console.log(
       `[${this.slot.id}] paper buy ${baseQty.toPrecision(4)} @ ${this.price.toExponential(4)} ` +
         `(pos ${s.baseQty.toPrecision(4)}, deployed ${s.deployedUsd.toFixed(2)})`
+    );
+    // Owner audit trail: every meme deployment lands in events.log. Telegram
+    // stays quiet in paper (dev loop); the LOUD live-fill alert is in liveBroker.
+    notify(
+      'info',
+      `[${this.slot.id}] paper BUY $${amount.toFixed(2)} of ${this.slot.baseAsset} ` +
+        `(${baseQty.toPrecision(4)} @ ${this.price.toPrecision(6)})`,
+      true
     );
   }
 
