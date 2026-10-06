@@ -144,7 +144,14 @@ export class WalletSizer {
     d.vaTargetSol = s.solUsd > 0
       ? Math.max(0.5, (s.derived.dcaBudgetUsd) / s.solUsd / 2)
       : d.vaTargetSol;
-    m.maxUsdcPosition = Math.max(5, Math.min(Math.round(s.derived.cybCapUsd), envNum("CYB_MAX_USDC", 200)));
+    // CYB ring-fence: $1 TOTAL default (single-buy demo slot, never an
+    // accumulator — mirrors the config.ts default; keep both in sync). The
+    // floor can never exceed the explicit ceiling.
+    const cybCeiling = envNum('CYB_MAX_USDC', 1);
+    m.maxUsdcPosition = Math.max(
+      Math.min(1, cybCeiling),
+      Math.min(Math.round(s.derived.cybCapUsd), cybCeiling)
+    );
     this.cfg.risk.maxUsdcPosition = Math.max(
       5,
       Math.round(s.derived.hardStopRefUsd)

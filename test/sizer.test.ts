@@ -89,8 +89,8 @@ test('sizer derives all budgets from real equity and mutates every book', async 
   // DCA VA target = budget / SOL price / 2.
   assert.ok(Math.abs(c.strategies.dca.vaTargetSol - (1710 * 0.50) / 105 / 2) < 0.01,
     `vaTarget=${c.strategies.dca.vaTargetSol}`);
-  // CYB cap: 10% of equity (was 200).
-  assert.equal(c.strategies.memes[0].maxUsdcPosition, Math.round(171),
+  // CYB cap: min(10% of equity, $1 total default) -> pinned to the $1 ceiling.
+  assert.equal(c.strategies.memes[0].maxUsdcPosition, 1,
     `cyb cap=${c.strategies.memes[0].maxUsdcPosition}`);
   // Hard-stop reference: 90% deployable (10% reserve), NOT the raw .env 400.
   assert.equal(c.risk.maxUsdcPosition, Math.round(1710 * 0.9),
@@ -127,8 +127,8 @@ test('hysteresis: price wobble does NOT rescale; a real deposit DOES', async () 
     c.strategies.dca.usdcAmountPerBuy > dcaAfterStart,
     `dca rescaled up: ${dcaAfterStart} -> ${c.strategies.dca.usdcAmountPerBuy}`
   );
-  // cyb cap = min(10% of equity, CYB_MAX_USDC hard ceiling; unset in tests -> 200 default)
-  assert.equal(c.strategies.memes[0].maxUsdcPosition, Math.min(Math.round((2100 + 2 * 113.4) * 0.1), Number(process.env.CYB_MAX_USDC ?? 200)));
+  // cyb cap = min(10% of equity, CYB_MAX_USDC hard ceiling; unset in tests -> $1 default)
+  assert.equal(c.strategies.memes[0].maxUsdcPosition, Math.min(Math.round((2100 + 2 * 113.4) * 0.1), Number(process.env.CYB_MAX_USDC ?? 1)));
 });
 
 test('small-wallet floors: budgets never collapse below sane minimums', async () => {
@@ -138,6 +138,6 @@ test('small-wallet floors: budgets never collapse below sane minimums', async ()
   await sizer.apply(signer);
   assert.ok(c.strategies.grid.usdcPerGrid >= 5, `grid floor, got ${c.strategies.grid.usdcPerGrid}`);
   assert.ok(c.strategies.dca.usdcAmountPerBuy >= 1, `dca floor, got ${c.strategies.dca.usdcAmountPerBuy}`);
-  assert.ok(c.strategies.memes[0].maxUsdcPosition >= 5, 'cyb floor');
+  assert.ok(c.strategies.memes[0].maxUsdcPosition >= 1, 'cyb floor');
   assert.ok(c.risk.maxUsdcPosition >= 5, 'hard-stop ref floor');
 });

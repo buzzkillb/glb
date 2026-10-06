@@ -525,7 +525,11 @@ export function loadConfig(): AppConfig {
           // Direct PumpSwap execution (Jupiter no longer routes this pool).
           pumpPool: 'CHVehKRbncDPDr1od9EYA1vp635wwFdZgXdzEXXT6v96',
           enabled: envBool('CYB_ENABLED', true),
-          maxUsdcPosition: envNumber('CYB_MAX_USDC', 200),
+          // $1 TOTAL by default: CYB is a single-buy demo slot — it buys once
+          // and is done, staying present without meaningful exposure (the
+          // sizer re-derives this ceiling; keep both in sync). Raise only
+          // deliberately. Old default was 200.
+          maxUsdcPosition: envNumber('CYB_MAX_USDC', 1),
           maxSlippageBps: envNumber('CYB_SLIPPAGE_BPS', 500, 0, 2000),
           usdcPerBuy: envNumber('CYB_USDC_PER_BUY', 1, 1, 1000),
           minIntervalMinutes: envNumber('CYB_MIN_INTERVAL_MIN', 5, 1, 1440),

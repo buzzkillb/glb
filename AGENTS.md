@@ -152,6 +152,10 @@ The status line in stdout (`SOL <price> | PnL <realized> | open <basket> | order
   `price: 0` rows when a feed blips; a `price > 0` guard is an open TODO.
 - **CYB rows carry $0 realized PnL** in the journal — the meme sleeve is
   fully exited; thin accounting if it's ever re-enabled.
+- **CYB is a $1-total demo slot by default** (changed 2026-10-06): the
+  ring-fenced cap defaults to $1 in both `config.ts` and the `sizer.ts`
+  re-derivation (floor ≤ ceiling), so the slot buys once (~$1) and is done.
+  A `.env` `CYB_MAX_USDC` override still wins; the old default was $200.
 
 ## 8. Verification checklist (any change)
 
