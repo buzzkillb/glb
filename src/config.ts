@@ -527,7 +527,7 @@ export function loadConfig(): AppConfig {
           enabled: envBool('CYB_ENABLED', true),
           maxUsdcPosition: envNumber('CYB_MAX_USDC', 200),
           maxSlippageBps: envNumber('CYB_SLIPPAGE_BPS', 500, 0, 2000),
-          usdcPerBuy: envNumber('CYB_USDC_PER_BUY', 10, 1, 1000),
+          usdcPerBuy: envNumber('CYB_USDC_PER_BUY', 1, 1, 1000),
           minIntervalMinutes: envNumber('CYB_MIN_INTERVAL_MIN', 5, 1, 1440),
           targetDepositPct: envNumber('CYB_TARGET_DEPOSIT_PCT', 0.6, 0.01, 1),
           historyHours: envNumber('CYB_HISTORY_HOURS', 72, 1, 2160),
