@@ -159,20 +159,26 @@
   .statline { display: flex; gap: 26px; font-size: 12px; color: var(--muted); margin-top: 14px; flex-wrap: wrap; align-items: center; }
   .statline b { color: var(--text); font-family: var(--mono); font-weight: 600; }
 
-  .ladder { display: flex; flex-direction: column; gap: 7px; }
+  .ladder { display: flex; flex-direction: column; gap: 3px; }
   .lvl {
-    display: grid; grid-template-columns: 100px 1fr 130px; gap: 14px; align-items: center;
+    display: grid; grid-template-columns: 88px 64px 1fr 62px; gap: 10px; align-items: center;
     font-family: var(--mono); font-size: 12px;
+    padding: 5px 10px; border-radius: 8px; border: 1px solid transparent;
   }
-  .lvl .tag { text-align: right; font-weight: 700; color: var(--text); }
-  .lvl .track { position: relative; height: 26px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-  .lvl .fill { position: absolute; inset: 0; opacity: .6; }
-  .lvl .fill.buy { background: linear-gradient(90deg, rgba(47,230,160,.35), rgba(47,230,160,.05)); }
-  .lvl .fill.sell { background: linear-gradient(90deg, rgba(124,140,255,.05), rgba(124,140,255,.35)); }
-  .lvl .marker { position: absolute; top: -3px; bottom: -3px; width: 3px; border-radius: 3px; }
-  .lvl .marker.live { background: var(--text); box-shadow: 0 0 12px rgba(238,241,248,.9); z-index: 3; }
-  .lvl .marker.lvlprice { background: var(--amber); z-index: 2; }
-  .lvl .qty { font-size: 11.5px; color: var(--muted); text-align: right; }
+  .lvl .px { text-align: right; font-weight: 700; color: var(--text); }
+  .lvl .side { text-align: center; }
+  .lvl .amt { text-align: right; color: var(--muted); font-size: 11.5px; }
+  .lvl .amt .dim { color: var(--dim); }
+  .lvl .dist { text-align: right; font-size: 11px; color: var(--muted); }
+  .lvl.buy  { background: rgba(47,230,160,.055); }
+  .lvl.sell { background: rgba(124,140,255,.07); }
+  .lvl.idle { opacity: .5; }
+  .lvl.next { border-color: var(--border2); opacity: 1; box-shadow: 0 0 0 1px rgba(124,140,255,.18); }
+  .liveRow { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-family: var(--mono); }
+  .liveRow .rule { flex: 1; height: 1px; background: var(--amber); opacity: .45; }
+  .liveRow .livepx { font-size: 11.5px; font-weight: 700; color: var(--amber); letter-spacing: .4px; white-space: nowrap; }
+  .ladderLegend { font-size: 11px; color: var(--dim); margin-top: 10px; font-family: var(--mono); }
+  .pill.idle { color: var(--dim); background: rgba(91,100,128,.12); }
 
   .seg { display: inline-flex; gap: 4px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 3px; }
   .seg button { padding: 4px 11px; font-size: 11px; border-radius: 6px; border: none; background: transparent; color: var(--muted); }
@@ -336,8 +342,10 @@
         <span>Step <b id="gridStep">—</b></span>
         <span>Levels <b id="gridLevels">—</b></span>
         <span>Armed <b id="gridArmed">—</b></span>
+        <span>Buy headroom <b id="gridHeadroom">—</b></span>
       </div>
       <div class="ladder" id="gridLadder"></div>
+      <div class="ladderLegend">sells stack above the live line, buys below · <b>BUY/SELL</b> = order armed · <b>idle</b> = waiting on budget / trend / inventory · <b>next</b> = first rung to fire</div>
     </div>
 
     <div class="section">
@@ -886,42 +894,61 @@
   }
 
   function renderGrid(s) {
-    const levels = (s.strategies.grid.levels) || [];
-    const prices = levels.map(l => l.price).filter(p => p > 0).sort((a,b)=>a-b);
-    const gLo = prices.length ? prices[0] : null;
-    const gHi = prices.length ? prices[prices.length-1] : null;
+    const levels = ((s.strategies.grid || {}).levels) || [];
+    const px = s.price || 0;
+    const prices = levels.map(l => l.price).filter(p => p > 0);
+    const gLo = prices.length ? Math.min(...prices) : null;
+    const gHi = prices.length ? Math.max(...prices) : null;
     $('gridRange').textContent = gLo !== null ? `[$${fmt(gLo)} – $${fmt(gHi)}]` : '';
     $('gridRange').className = 'muted';
     // Anchor is DERIVED: the midpoint of the armed ladder (no `anchor` field).
-    const mid = prices.length ? (prices[0] + prices[prices.length-1]) / 2 : null;
+    const mid = prices.length ? (gLo + gHi) / 2 : null;
     $('gridAnchor').textContent = mid ? '$' + fmt(mid,2) : '—';
-    $('gridStep').textContent = prices.length > 1 ? '$' + fmt(prices[1]-prices[0],2) : '—';
+    const asc = [...prices].sort((a,b)=>a-b);
+    $('gridStep').textContent = asc.length > 1 ? '$' + fmt(asc[1]-asc[0],2) : '—';
     $('gridLevels').textContent = levels.length;
     const armed = levels.filter(l => l.buyOrderId || l.sellOrderId).length;
     $('gridArmed').textContent = armed;
+    // Why rungs sit idle: a BUY needs headroom under the capital cap
+    // (gridStrategy.canAffordBuy), plus trend/inventory gates.
+    const maxUsdc = (s.risk && s.risk.maxUsdcPosition) || 0;
+    const deployed = (s.risk && s.risk.deployedUsd) || 0;
+    const head = maxUsdc > 0 ? Math.max(0, maxUsdc - deployed) : null;
+    $('gridHeadroom').textContent = head === null ? '—' : '$' + fmt(head, 0) + ' free';
 
     const ladder = $('gridLadder');
     ladder.innerHTML = '';
-    const rangeSpan = (gHi !== null && gHi > gLo) ? gHi - gLo : 1;
-    for (const lv of levels) {
-      if (!(lv.price > 0)) continue;
+    // Order-book layout: highest price first, so SELL rungs stack above the
+    // live-price divider and BUY rungs below it.
+    const rows = levels.filter(l => l.price > 0).sort((a,b) => b.price - a.price);
+    const nextBuy = rows.filter(l => l.buyOrderId && l.price < px).sort((a,b)=>b.price-a.price)[0] || null;
+    const nextSell = rows.filter(l => l.sellOrderId && l.price > px).sort((a,b)=>a.price-b.price)[0] || null;
+    const addDivider = (suffix) => {
+      const d = document.createElement('div');
+      d.className = 'liveRow';
+      d.innerHTML = `<div class="rule"></div><div class="livepx">● live $${fmt(px,2)}${suffix ? ' · ' + suffix : ''}</div><div class="rule"></div>`;
+      ladder.appendChild(d);
+    };
+    if (!rows.length) return;
+    const pxValid = px > 0;
+    let dividerPlaced = false;
+    if (pxValid && px > rows[0].price) { addDivider('above ladder'); dividerPlaced = true; }
+    for (const lv of rows) {
+      if (pxValid && !dividerPlaced && px >= lv.price) { addDivider(''); dividerPlaced = true; }
       const hasBuy = !!lv.buyOrderId, hasSell = !!lv.sellOrderId;
-      const side = hasBuy ? 'buy' : hasSell ? 'sell' : 'none';
-      const posInRange = ((lv.price - (gLo ?? 0))/rangeSpan)*100;
-      const inLive = s.price >= (gLo ?? 0) && s.price <= (gHi ?? 0);
-      const livePct = inLive ? ((s.price - (gLo ?? 0))/rangeSpan)*100 : -1;
+      const side = hasBuy ? 'buy' : hasSell ? 'sell' : 'idle';
+      const distPct = pxValid ? ((lv.price - px) / px) * 100 : 0;
+      const isNext = lv === nextBuy || lv === nextSell;
       const row = document.createElement('div');
-      row.className = 'lvl';
+      row.className = 'lvl ' + side + (isNext ? ' next' : '');
       row.innerHTML = `
-        <div class="tag">$${fmt(lv.price,2)}</div>
-        <div class="track">
-          <div class="fill ${side}"></div>
-          <div class="marker lvlprice" style="left:${posInRange}%"></div>
-          ${livePct >= 0 ? `<div class="marker live" style="left:${livePct}%"></div>` : ''}
-        </div>
-        <div class="qty">${fmt(lv.baseQty,4)} SOL ${hasBuy ? '· BUY' : hasSell ? '· SELL' : ''}</div>`;
+        <div class="px">$${fmt(lv.price,2)}</div>
+        <div class="side"><span class="pill ${side}">${hasBuy ? 'BUY' : hasSell ? 'SELL' : 'idle'}</span></div>
+        <div class="amt">${fmt(lv.baseQty,4)} SOL <span class="dim">≈ $${fmt(lv.baseQty * lv.price, 0)}</span></div>
+        <div class="dist">${distPct >= 0 ? '+' : ''}${distPct.toFixed(1)}%</div>`;
       ladder.appendChild(row);
     }
+    if (pxValid && !dividerPlaced) addDivider('below ladder');
   }
 
   function renderDca(s) {
